@@ -8,7 +8,6 @@ namespace rai {
 namespace natsmd {
 
 struct EvNatsListen : public kv::EvTcpListen {
-  uint64_t timer_id;
   void * operator new( size_t, void *ptr ) { return ptr; }
   EvNatsListen( kv::EvPoll &p ) noexcept;
   virtual bool accept( void ) noexcept;
@@ -25,7 +24,6 @@ enum NatsState {
 };
 
 struct EvNatsService : public kv::EvConnection {
-  static const uint8_t EV_NATS_SOCK = 6;
   void * operator new( size_t, void *ptr ) { return ptr; }
   NatsSubMap map;
 
@@ -56,7 +54,7 @@ struct EvNatsService : public kv::EvConnection {
            * pass,
            * auth_token;
 
-  EvNatsService( kv::EvPoll &p ) : kv::EvConnection( p, EV_NATS_SOCK ) {}
+  EvNatsService( kv::EvPoll &p,  const uint8_t t ) : kv::EvConnection( p, t ) {}
   void initialize_state( void ) {
     this->msg_ptr   = NULL;
     this->msg_len   = 0;
@@ -84,8 +82,6 @@ struct EvNatsService : public kv::EvConnection {
   bool fwd_pub( void ) noexcept;
   bool fwd_msg( kv::EvPublish &pub,  const void *sid,  size_t sid_len ) noexcept;
   void parse_connect( const char *buf,  size_t sz ) noexcept;
-  void push_free_list( void ) noexcept;
-  void pop_free_list( void ) noexcept;
   /* EvSocket */
   virtual void process( void ) noexcept final;
   virtual void release( void ) noexcept final;

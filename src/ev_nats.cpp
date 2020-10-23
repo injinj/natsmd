@@ -28,7 +28,7 @@ using namespace kv;
 using namespace md;
 
 EvNatsListen::EvNatsListen( EvPoll &p ) noexcept
-  : EvTcpListen( p, EvNatsService::EV_NATS_SOCK, "nats_sock" ) {}
+  : EvTcpListen( p, "nats_listen", "nats_sock" ) {}
 
 /*
  * NATS protocol:
@@ -126,8 +126,7 @@ EvNatsListen::accept( void ) noexcept
     return false;
   }
   EvNatsService *c =
-    this->poll.get_free_list<EvNatsService>(
-      this->poll.free_list[ EvNatsService::EV_NATS_SOCK ] );
+    this->poll.get_free_list<EvNatsService>( this->accept_sock_type );
   if ( c == NULL ) {
     perror( "accept: no memory" );
     ::close( sock );
@@ -157,7 +156,7 @@ EvNatsListen::accept( void ) noexcept
   if ( this->poll.add_sock( c ) < 0 ) {
     printf( "failed to add sock %d\n", sock );
     ::close( sock );
-    c->push_free_list();
+    this->poll.push_free_list( c );
     return false;
   }
   c->append_iov( nats_server_info, sizeof( nats_server_info ) );
@@ -847,27 +846,10 @@ EvNatsService::release( void ) noexcept
   this->rem_all_sub();
   this->map.release();
   this->EvConnection::release_buffers();
-  this->push_free_list();
+  this->poll.push_free_list( this );
 }
 
-void
-EvNatsService::push_free_list( void ) noexcept
+bool EvNatsService::timer_expire( uint64_t, uint64_t ) noexcept
 {
-  if ( this->in_list( IN_ACTIVE_LIST ) )
-    fprintf( stderr, "nats sock should not be in active list\n" );
-  else if ( ! this->in_list( IN_FREE_LIST ) ) {
-    this->set_list( IN_FREE_LIST );
-    this->poll.free_list[ EV_NATS_SOCK ].push_hd( this );
-  }
+  return false;
 }
-
-void
-EvNatsService::pop_free_list( void ) noexcept
-{
-  if ( this->in_list( IN_FREE_LIST ) ) {
-    this->set_list( IN_NO_LIST );
-    this->poll.free_list[ EV_NATS_SOCK ].pop( this );
-  }
-}
-
-bool EvNatsService::timer_expire( uint64_t, uint64_t ) noexcept { return false; }
