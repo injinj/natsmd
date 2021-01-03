@@ -417,7 +417,8 @@ EvNatsService::add_sub( void ) noexcept
       this->add_wild( xsubj );
     }
     else {
-      uint32_t rcnt = this->poll.sub_route.add_route( xsubj.hash(), this->fd );
+      uint32_t rcnt = this->poll.sub_route.add_sub_route( xsubj.hash(),
+                                                          this->fd );
       this->poll.notify_sub( xsubj.hash(), xsubj.str, xsubj.len,
                              this->fd, rcnt, 'N' );
     }
@@ -432,8 +433,7 @@ void
 EvNatsService::add_wild( NatsStr &xsubj ) noexcept
 {
   NatsWildRec * rt;
-  char          buf[ 1024 ];
-  PatternCvt    cvt( buf, sizeof( buf ) );
+  PatternCvt    cvt;
   uint32_t      h, rcnt;
   size_t        erroff;
   int           error;
@@ -444,7 +444,8 @@ EvNatsService::add_wild( NatsStr &xsubj ) noexcept
     rt = this->map.add_wild( h, xsubj );
     if ( rt == NULL || rt->re != NULL )
       return;
-    rt->re = pcre2_compile( (uint8_t *) buf, cvt.off, 0, &error, &erroff, 0 );
+    rt->re = pcre2_compile( (uint8_t *) cvt.out, cvt.off, 0,
+                            &error, &erroff, 0 );
     if ( rt->re == NULL ) {
       fprintf( stderr, "re failed\n" );
     }
@@ -461,7 +462,7 @@ EvNatsService::add_wild( NatsStr &xsubj ) noexcept
       return;
     }
     rcnt = this->poll.sub_route.add_pattern_route( h, this->fd, cvt.prefixlen );
-    this->poll.notify_psub( h, buf, cvt.off, xsubj.str, cvt.prefixlen,
+    this->poll.notify_psub( h, cvt.out, cvt.off, xsubj.str, cvt.prefixlen,
                             this->fd, rcnt, 'N' );
   }
 }
@@ -487,8 +488,7 @@ NatsSubMap::rem_wild( uint32_t h,  NatsStr &subj ) noexcept
 void
 EvNatsService::rem_wild( NatsStr &xsubj ) noexcept
 {
-  char       buf[ 1024 ];
-  PatternCvt cvt( buf, sizeof( buf ) );
+  PatternCvt cvt;
   uint32_t   h, rcnt;
 
   if ( cvt.convert_rv( xsubj.str, xsubj.len ) == 0 ) {
@@ -496,7 +496,7 @@ EvNatsService::rem_wild( NatsStr &xsubj ) noexcept
                   this->poll.sub_route.prefix_seed( cvt.prefixlen ) );
     rcnt = this->poll.sub_route.del_pattern_route( h, this->fd,
                                                    cvt.prefixlen );
-    this->poll.notify_punsub( h, buf, cvt.off, xsubj.str, cvt.prefixlen,
+    this->poll.notify_punsub( h, cvt.out, cvt.off, xsubj.str, cvt.prefixlen,
                               this->fd, rcnt, 'N' );
     this->map.rem_wild( h, xsubj );
   }
@@ -522,7 +522,7 @@ EvNatsService::rem_sid( uint32_t max_msgs ) noexcept
         else {
           uint32_t rcnt = 0;
           if ( this->map.sub_map.find_by_hash( h ) == NULL )
-            rcnt = this->poll.sub_route.del_route( h, this->fd );
+            rcnt = this->poll.sub_route.del_sub_route( h, this->fd );
           this->poll.notify_unsub( h, xsubj.str, xsubj.len,
                                    this->fd, rcnt, 'N' );
         }
@@ -569,7 +569,7 @@ EvNatsService::rem_all_sub( void ) noexcept
     if ( xsubj.is_wild() )
       this->rem_wild( xsubj );
     else {
-      uint32_t rcnt = this->poll.sub_route.del_route( rt->hash, this->fd );
+      uint32_t rcnt = this->poll.sub_route.del_sub_route( rt->hash, this->fd );
       this->poll.notify_unsub( rt->hash, xsubj.str, xsubj.len,
                                this->fd, rcnt, 'N' );
     }
@@ -614,7 +614,7 @@ EvNatsService::on_msg( EvPublish &pub ) noexcept
             uint32_t rcnt = 0;
             /* check for duplicate hashes */
             if ( this->map.sub_map.find_by_hash( h ) == NULL )
-              rcnt = this->poll.sub_route.del_route( h, this->fd );
+              rcnt = this->poll.sub_route.del_sub_route( h, this->fd );
             this->poll.notify_unsub( h, xsubj.str, xsubj.len,
                                      this->fd, rcnt, 'N' );
           }
