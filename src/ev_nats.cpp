@@ -146,8 +146,8 @@ EvNatsListen::accept( void ) noexcept
       else if ( myaddr.ss_family == AF_INET6 )
         port = ntohs( ((sockaddr_in6 *) &myaddr)->sin6_port );
     }
-    h1 = this->poll.map->hdr.create_stamp;
-    h2 = this->poll.map->hdr.seed[ 0 ].hash2;
+    h1 = this->poll.create_ns();
+    h2 = /*this->poll.map->hdr.seed[ 0 ].hash2;*/ 0;
     init_server_info( h1, h2, port );
   }
   c->PeerData::init_peer( sock, (struct sockaddr *) &addr, "nats" );
@@ -159,70 +159,8 @@ EvNatsListen::accept( void ) noexcept
     this->poll.push_free_list( c );
     return false;
   }
-  c->append_iov( nats_server_info, sizeof( nats_server_info ) );
+  c->append_iov( nats_server_info, sizeof( nats_server_info ) - 1 );
   return true;
-}
-
-static char *
-parse_end_size( char *start,  char *end,  size_t &sz,  size_t &digits )
-{
-  while ( end > start ) {
-    if ( *--end >= '0' && *end <= '9' ) {
-      char *last_digit = end;
-      sz = (size_t) ( *end - '0' );
-      if ( *--end >= '0' && *end <= '9' ) {
-        sz += (size_t) ( *end - '0' ) * 10;
-        if ( *--end >= '0' && *end <= '9' ) {
-          sz += (size_t) ( *end - '0' ) * 100;
-          if ( *--end >= '0' && *end <= '9' ) {
-            sz += (size_t) ( *end - '0' ) * 1000;
-            if ( *--end >= '0' && *end <= '9' ) {
-              size_t p = 10000;
-              do {
-                sz += (size_t) ( *end - '0' ) * p;
-                p  *= 10;
-              } while ( *--end >= '0' && *end <= '9' );
-            }
-          }
-        }
-      }
-      digits = (size_t) ( last_digit - end );
-      return end;
-    }
-  }
-  sz = 0;
-  digits = 0;
-  return NULL;
-}
-
-static const size_t MAX_NATS_ARGS = 3; /* <subject> <sid> <reply> */
-
-static size_t
-parse_args( char *start,  char *end,  char **args,  size_t *len )
-{
-  char *p;
-  size_t n;
-  for ( p = start; ; p++ ) {
-    if ( p >= end )
-      return 0;
-    if ( *p > ' ' )
-      break;
-  }
-  n = 0;
-  args[ 0 ] = p;
-  for (;;) {
-    if ( ++p == end || *p <= ' ' ) {
-      len[ n ] = p - args[ n ];
-      if ( ++n == MAX_NATS_ARGS )
-        return n;
-      while ( p < end && *p <= ' ' )
-        p++;
-      if ( p == end )
-        break;
-      args[ n ] = p;
-    }
-  }
-  return n;
 }
 
 void
@@ -235,9 +173,8 @@ EvNatsService::process( void ) noexcept
                     pong[] = "PONG\r\n";
   size_t            buflen, used, sz, nargs, size_len, max_msgs;
   char            * p, * eol, * start, * end, * size_start;
-  char            * args[ MAX_NATS_ARGS ];
-  size_t            argslen[ MAX_NATS_ARGS ];
-  int               fl, verb_ok, cmd_cnt, msg_cnt;
+  NatsArgs          args;
+  int               fl, verb_ok/*, cmd_cnt, msg_cnt*/;
 
   for (;;) { 
     buflen = this->len - this->off;
@@ -249,8 +186,8 @@ EvNatsService::process( void ) noexcept
 
     used    = 0;
     fl      = 0;
-    cmd_cnt = 0;
-    msg_cnt = 0;
+    /*cmd_cnt = 0;*/
+    /*msg_cnt = 0;*/
     verb_ok = ( this->verbose ? DO_OK : 0 );
     /* decode nats hdrs */
     for ( p = start; p < end; ) {
@@ -267,22 +204,22 @@ EvNatsService::process( void ) noexcept
               case NATS_KW_ERR:     break; */
               case NATS_KW_SUB1:   /* SUB <subject> [queue group] <sid> */
               case NATS_KW_SUB2:
-                nargs = parse_args( &p[ 4 ], eol, args, argslen );
+                nargs = args.parse( &p[ 4 ], eol );
                 if ( nargs != 2 ) {
                   fl |= DO_ERR;
                   break;
                 }
-                this->subject     = args[ 0 ];
-                this->sid         = args[ 1 ];
-                this->subject_len = argslen[ 0 ];
-                this->sid_len     = argslen[ 1 ];
+                this->subject     = args.ptr[ 0 ];
+                this->sid         = args.ptr[ 1 ];
+                this->subject_len = args.len[ 0 ];
+                this->sid_len     = args.len[ 1 ];
                 this->add_sub();
                 fl |= verb_ok;
                 break;
               case NATS_KW_PUB1:   /* PUB <subject> [reply] <size> */
               case NATS_KW_PUB2:
-                size_start = parse_end_size( p, eol - 1, this->msg_len,
-                                             size_len );
+                size_start = args.parse_end_size( p, eol - 1, this->msg_len,
+                                                  size_len );
                 if ( size_start == NULL ) {
                   fl |= DO_ERR;
                   break;
@@ -298,16 +235,16 @@ EvNatsService::process( void ) noexcept
                   size_start = &tmp[ size_start - p ];
                   p = tmp;
                 }
-                nargs = parse_args( &p[ 4 ], size_start, args, argslen );
+                nargs = args.parse( &p[ 4 ], size_start );
                 if ( nargs < 1 || nargs > 2 ) {
                   fl |= DO_ERR;
                   break;
                 }
-                this->subject     = args[ 0 ];
-                this->subject_len = argslen[ 0 ];
+                this->subject     = args.ptr[ 0 ];
+                this->subject_len = args.len[ 0 ];
                 if ( nargs > 1 ) {
-                  this->reply     = args[ 1 ];
-                  this->reply_len = argslen[ 1 ];
+                  this->reply     = args.ptr[ 1 ];
+                  this->reply_len = args.len[ 1 ];
                 }
                 else {
                   this->reply     = NULL;
@@ -324,20 +261,21 @@ EvNatsService::process( void ) noexcept
             /*case NATS_KW_PONG:    break;
               case NATS_KW_INFO:    break;*/
               case NATS_KW_UNSUB: /* UNSUB <sid> [max-msgs] */
-                nargs = parse_args( &p[ 6 ], eol, args, argslen );
+                nargs = args.parse( &p[ 6 ], eol );
                 if ( nargs != 1 ) {
                   if ( nargs != 2 ) {
                     fl |= DO_ERR;
                     break;
                   }
-                  parse_end_size( args[ 1 ], &args[ 1 ][ argslen[ 1 ] ],
-                                  max_msgs, size_len );
+                  args.parse_end_size( args.ptr[ 1 ],
+                                       &args.ptr[ 1 ][ args.len[ 1 ] ],
+                                       max_msgs, size_len );
                 }
                 else {
                   max_msgs = 0;
                 }
-                this->sid         = args[ 0 ];
-                this->sid_len     = argslen[ 0 ];
+                this->sid         = args.ptr[ 0 ];
+                this->sid_len     = args.len[ 0 ];
                 this->subject     = NULL;
                 this->subject_len = 0;
                 this->rem_sid( max_msgs );
@@ -352,7 +290,7 @@ EvNatsService::process( void ) noexcept
           }
           p = &eol[ 1 ];
           used += sz;
-          cmd_cnt++;
+          /*cmd_cnt++;*/
         }
         else { /* no end of line */
           fl |= NEED_MORE;
@@ -372,7 +310,7 @@ EvNatsService::process( void ) noexcept
           if ( ! this->fwd_pub() )
             fl |= FLOW_BACKPRESSURE;
           fl |= verb_ok;
-          msg_cnt++;
+          /*msg_cnt++;*/
         }
         else { /* not enough to consume message */
           fl |= NEED_MORE;
@@ -586,7 +524,7 @@ EvNatsService::fwd_pub( void ) noexcept
                  this->fd, xsub.hash(),
                  this->msg_len_ptr, this->msg_len_digits,
                  MD_STRING, 'p' );
-  return this->poll.forward_msg( pub, NULL, 0, NULL );
+  return this->poll.forward_msg( pub );
 }
 
 bool

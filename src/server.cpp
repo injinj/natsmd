@@ -44,14 +44,19 @@ main( int argc, const char *argv[] )
   EvShm shm;
   Args  r;
 
-  r.add_desc( "  -c nats  = listen nats port      (8866)\n" );
+  r.no_threads   = true;
+  r.no_reuseport = true;
+  r.no_map       = true;
+  r.no_default   = true;
+  r.all          = true;
+  r.add_desc( "  -c nats  = listen nats port      (42222)\n" );
   if ( ! r.parse_args( argc, argv ) )
     return 1;
   if ( shm.open( r.map_name, r.db_num ) != 0 )
     return 1;
   printf( "nats_version:         " kv_stringify( NATSMD_VER ) "\n" );
   shm.print();
-  r.nats_port = r.parse_port( argc, argv, "-c", "8866" );
+  r.nats_port = r.parse_port( argc, argv, "-c", "42222" );
   Runner<Args, Loop> runner( r, shm, Loop::initialize );
   if ( r.thr_error == 0 )
     return 0;

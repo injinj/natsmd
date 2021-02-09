@@ -111,13 +111,13 @@ lnk_lib     += -ldecnumber
 dlnk_lib    += -ldecnumber
 endif
 
-nats_lib    := $(libd)/libnats.a
+natsmd_lib  := $(libd)/libnatsmd.a
 rpath       := -Wl,-rpath,$(pwd)/$(libd)$(rpath1)$(rpath2)$(rpath3)$(rpath4)$(rpath5)$(rpath6)$(rpath7)
 dlnk_lib    += -lpcre2-8 -lcrypto
 malloc_lib  :=
 
 .PHONY: everything
-everything: $(kv_lib) $(dec_lib) $(md_lib) $(nats_lib) all
+everything: $(kv_lib) $(dec_lib) $(md_lib) $(natsmd_lib) all
 
 clean_subs :=
 dlnk_dll_depend :=
@@ -164,34 +164,48 @@ all_dlls    :=
 all_depends :=
 gen_files   :=
 
-libnats_files := ev_nats
-libnats_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(libnats_files)))
-libnats_dbjs  := $(addprefix $(objd)/, $(addsuffix .fpic.o, $(libnats_files)))
-libnats_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(libnats_files))) \
-                  $(addprefix $(dependd)/, $(addsuffix .fpic.d, $(libnats_files)))
-libnats_dlnk  := $(dlnk_lib)
-libnats_spec  := $(version)-$(build_num)
-libnats_ver   := $(major_num).$(minor_num)
+libnatsmd_files := ev_nats ev_nats_client
+libnatsmd_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(libnatsmd_files)))
+libnatsmd_dbjs  := $(addprefix $(objd)/, $(addsuffix .fpic.o, $(libnatsmd_files)))
+libnatsmd_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(libnatsmd_files))) \
+                  $(addprefix $(dependd)/, $(addsuffix .fpic.d, $(libnatsmd_files)))
+libnatsmd_dlnk  := $(dlnk_lib)
+libnatsmd_spec  := $(version)-$(build_num)
+libnatsmd_ver   := $(major_num).$(minor_num)
 
-$(libd)/libnats.a: $(libnats_objs)
-$(libd)/libnats.so: $(libnats_dbjs) $(dlnk_dep)
+$(libd)/libnatsmd.a: $(libnatsmd_objs)
+$(libd)/libnatsmd.so: $(libnatsmd_dbjs) $(dlnk_dep)
 
-all_libs    += $(libd)/libnats.a
-all_dlls    += $(libd)/libnats.so
-all_depends += $(libnats_deps)
+all_libs    += $(libd)/libnatsmd.a
+all_dlls    += $(libd)/libnatsmd.so
+all_depends += $(libnatsmd_deps)
 
 server_defines := -DCAPR_VER=$(ver_build)
-nats_server_files := server
-nats_server_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(nats_server_files)))
-nats_server_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(nats_server_files)))
-nats_server_libs  := $(nats_lib)
-nats_server_lnk   := $(nats_lib) $(lnk_lib) -lpcre2-8
+natsmd_server_files := server
+natsmd_server_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(natsmd_server_files)))
+natsmd_server_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(natsmd_server_files)))
+natsmd_server_libs  := $(natsmd_lib)
+natsmd_server_lnk   := $(natsmd_lib) $(lnk_lib) -lpcre2-8
 
-$(bind)/nats_server: $(nats_server_objs) $(server_libs) $(lnk_dep)
+$(bind)/natsmd_server: $(natsmd_server_objs) $(natsmd_server_libs) $(lnk_dep)
 
-all_exes    += $(bind)/nats_server
-all_depends += $(nats_server_deps)
+all_exes    += $(bind)/natsmd_server
+all_depends += $(natsmd_server_deps)
 server_defines := -DNATSMD_VER=$(ver_build)
+
+ping_nats_includes := -IHdrHistogram_c/src
+ping_nats_defines  := -Wno-unused-function
+
+ping_nats_files := ping_nats
+ping_nats_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(ping_nats_files)))
+ping_nats_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(ping_nats_files)))
+ping_nats_libs  := 
+ping_nats_lnk   := $(lnk_lib) HdrHistogram_c/$(libd)/libhdrhist.a
+
+$(bind)/ping_nats: $(ping_nats_objs) $(ping_nats_libs) $(lnk_dep)
+
+all_exes    += $(bind)/ping_nats
+all_depends += $(ping_nats_deps)
 
 all_dirs := $(bind) $(libd) $(objd) $(dependd)
 
@@ -237,13 +251,13 @@ $(dependd)/depend.make: $(dependd) $(all_depends)
 	@cat $(all_depends) >> $(dependd)/depend.make
 
 .PHONY: dist_bins
-dist_bins: $(all_libs) $(bind)/nats_server
-	chrpath -d $(libd)/libnats.so
-	chrpath -d $(bind)/nats_server
+dist_bins: $(all_libs) $(bind)/natsmd_server
+	chrpath -d $(libd)/libnatsmd.so
+	chrpath -d $(bind)/natsmd_server
 
 .PHONY: dist_rpm
 dist_rpm: srpm
-	( cd rpmbuild && rpmbuild --define "-topdir `pwd`" -ba SPECS/nats.spec )
+	( cd rpmbuild && rpmbuild --define "-topdir `pwd`" -ba SPECS/natsmd.spec )
 
 # dependencies made by 'make depend'
 -include $(dependd)/depend.make
@@ -252,21 +266,21 @@ ifeq ($(DESTDIR),)
 # 'sudo make install' puts things in /usr/local/lib, /usr/local/include
 install_prefix = /usr/local
 else
-# debuild uses DESTDIR to put things into debian/nats/usr
+# debuild uses DESTDIR to put things into debian/natsmd/usr
 install_prefix = $(DESTDIR)/usr
 endif
 
 install: dist_bins
 	install -d $(install_prefix)/lib $(install_prefix)/bin
-	install -d $(install_prefix)/include/nats
-	for f in $(libd)/libnats.* ; do \
+	install -d $(install_prefix)/include/natsmd
+	for f in $(libd)/libnatsmd.* ; do \
 	if [ -h $$f ] ; then \
 	cp -a $$f $(install_prefix)/lib ; \
 	else \
 	install $$f $(install_prefix)/lib ; \
 	fi ; \
 	done
-	install -m 644 include/nats/*.h $(install_prefix)/include/nats
+	install -m 644 include/natsmd/*.h $(install_prefix)/include/natsmd
 
 $(objd)/%.o: src/%.cpp
 	$(cpp) $(cflags) $(cppflags) $(includes) $(defines) $($(notdir $*)_includes) $($(notdir $*)_defines) -c $< -o $@

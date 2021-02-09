@@ -127,6 +127,72 @@ struct EvNatsService : public kv::EvConnection {
 #define NATS_JS_PASS        NATS_KW( 'P', 'A', 'S', 'S' )
 #define NATS_JS_AUTH_TOKEN  NATS_KW( 'A', 'U', 'T', 'H' )
 
+struct NatsArgs {
+  static const size_t MAX_NATS_ARGS = 3; /* <subject> <sid> [reply] */
+  char * ptr[ MAX_NATS_ARGS ];
+  size_t len[ MAX_NATS_ARGS ];
+
+  /* parse args into ptr[], len[], return arg count */
+  size_t parse( char *start,  char *end ) {
+    char *p;
+    size_t n;
+    for ( p = start; ; p++ ) { /* skip PUB / MSG / SUB */
+      if ( p >= end )
+        return 0;
+      if ( *p > ' ' )
+        break;
+    }
+    n = 0;
+    this->ptr[ 0 ] = p; /* break args up by spaces */
+    for (;;) {
+      if ( ++p == end || *p <= ' ' ) {
+        this->len[ n ] = p - this->ptr[ n ];
+        if ( ++n == MAX_NATS_ARGS )
+          return n;
+        for (;;) {
+          if ( p >= end )
+            return n;
+          if ( *p > ' ' )
+            break;
+          p++;
+        }
+        this->ptr[ n ] = p;
+      }
+    }
+  }
+  /* parse a number from the end of a string */
+  static char * parse_end_size( char *start,  char *end,  size_t &sz,
+                                size_t &digits ) {
+    while ( end > start ) {
+      if ( *--end >= '0' && *end <= '9' ) {
+        char *last_digit = end;
+        sz = (size_t) ( *end - '0' );
+        if ( *--end >= '0' && *end <= '9' ) {
+          sz += (size_t) ( *end - '0' ) * 10;
+          if ( *--end >= '0' && *end <= '9' ) {
+            sz += (size_t) ( *end - '0' ) * 100;
+            if ( *--end >= '0' && *end <= '9' ) {
+              sz += (size_t) ( *end - '0' ) * 1000;
+              if ( *--end >= '0' && *end <= '9' ) {
+                size_t p = 10000;
+                do {
+                  sz += (size_t) ( *end - '0' ) * p;
+                  p  *= 10;
+                } while ( *--end >= '0' && *end <= '9' );
+              }
+            }
+          }
+        }
+        digits = (size_t) ( last_digit - end );
+        return end;
+      }
+    }
+    sz = 0;
+    digits = 0;
+    return NULL;
+  }
+};
+
 }
 }
 #endif
