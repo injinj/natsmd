@@ -74,6 +74,14 @@ struct EvNatsService : public kv::EvConnection {
     this->user = this->pass = this->auth_token = NULL;
   }
   /*HashData * resize_tab( HashData *curr,  size_t add_len );*/
+  char *save_string( const void *ptr,  size_t len ) {
+    if ( len <= this->tmp_size ) {
+      this->tmp_size -= len;
+      ::memcpy( &this->buffer[ this->tmp_size ], ptr, len );
+      return &this->buffer[ this->tmp_size ];
+    }
+    return NULL;
+  }
   void add_sub( void ) noexcept;
   void add_wild( NatsStr &xsubj ) noexcept;
   void rem_sid( uint32_t max_msgs ) noexcept;
@@ -115,17 +123,25 @@ struct EvNatsService : public kv::EvConnection {
 /* PING  = 1196312912, 0x474e4950 */
 /* UNSUB = 1431522901, 0x55534e55 */
 
-#define NATS_JS_VERBOSE     NATS_KW( 'V', 'E', 'R', 'B' )
-#define NATS_JS_PEDANTIC    NATS_KW( 'P', 'E', 'D', 'A' )
-#define NATS_JS_TLS_REQUIRE NATS_KW( 'T', 'L', 'S', '_' )
-#define NATS_JS_NAME        NATS_KW( 'N', 'A', 'M', 'E' )
-#define NATS_JS_LANG        NATS_KW( 'L', 'A', 'N', 'G' )
-#define NATS_JS_VERSION     NATS_KW( 'V', 'E', 'R', 'S' )
-#define NATS_JS_PROTOCOL    NATS_KW( 'P', 'R', 'O', 'T' )
-#define NATS_JS_ECHO        NATS_KW( 'E', 'C', 'H', 'O' )
-#define NATS_JS_USER        NATS_KW( 'U', 'S', 'E', 'R' )
-#define NATS_JS_PASS        NATS_KW( 'P', 'A', 'S', 'S' )
-#define NATS_JS_AUTH_TOKEN  NATS_KW( 'A', 'U', 'T', 'H' )
+#define NATS_JS_VERBOSE      NATS_KW( 'V', 'E', 'R', 'B' )
+#define NATS_JS_PEDANTIC     NATS_KW( 'P', 'E', 'D', 'A' )
+#define NATS_JS_TLS_REQUIRE  NATS_KW( 'T', 'L', 'S', '_' )
+#define NATS_JS_NAME         NATS_KW( 'N', 'A', 'M', 'E' )
+#define NATS_JS_LANG         NATS_KW( 'L', 'A', 'N', 'G' )
+#define NATS_JS_VERSION      NATS_KW( 'V', 'E', 'R', 'S' )
+#define NATS_JS_PROTOCOL     NATS_KW( 'P', 'R', 'O', 'T' )
+#define NATS_JS_ECHO         NATS_KW( 'E', 'C', 'H', 'O' )
+#define NATS_JS_USER         NATS_KW( 'U', 'S', 'E', 'R' )
+#define NATS_JS_PASS         NATS_KW( 'P', 'A', 'S', 'S' )
+#define NATS_JS_AUTH_TOKEN   NATS_KW( 'A', 'U', 'T', 'H' )
+
+#define NATS_JS_SERVER       NATS_KW( 'S', 'E', 'R', 'V' )
+#define NATS_JS_MAX_PAYLOAD  NATS_KW( 'M', 'A', 'X', '_' )
+#define NATS_JS_CONNECT_URLS NATS_KW( 'C', 'O', 'N', 'N' )
+#define NATS_JS_CLIENT       NATS_KW( 'C', 'L', 'I', 'E' )
+#define NATS_JS_HOST         NATS_KW( 'H', 'O', 'S', 'T' )
+#define NATS_JS_PORT         NATS_KW( 'P', 'O', 'R', 'T' )
+#define NATS_JS_GIT_COMMIT   NATS_KW( 'G', 'I', 'T', '_' )
 
 struct NatsArgs {
   static const size_t MAX_NATS_ARGS = 3; /* <subject> <sid> [reply] */

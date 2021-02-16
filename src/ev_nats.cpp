@@ -20,7 +20,7 @@
 #define PCRE2_CODE_UNIT_WIDTH 8
 #include <pcre2.h>
 #include <raikv/pattern_cvt.h>
-#include <raimd/md_types.h>
+#include <raimd/json_msg.h>
 
 using namespace rai;
 using namespace natsmd;
@@ -171,7 +171,7 @@ EvNatsService::process( void ) noexcept
   static const char ok[]   = "+OK\r\n",
                     err[]  = "-ERR\r\n",
                     pong[] = "PONG\r\n";
-  size_t            buflen, used, sz, nargs, size_len, max_msgs;
+  size_t            buflen, used, linesz, nargs, size_len, max_msgs;
   char            * p, * eol, * start, * end, * size_start;
   NatsArgs          args;
   int               fl, verb_ok/*, cmd_cnt, msg_cnt*/;
@@ -194,8 +194,8 @@ EvNatsService::process( void ) noexcept
       if ( this->msg_state == NATS_HDR_STATE ) {
         eol = (char *) ::memchr( &p[ 1 ], '\n', end - &p[ 1 ] );
         if ( eol != NULL ) {
-          sz = &eol[ 1 ] - p;
-          if ( sz > 3 ) {
+          linesz = &eol[ 1 ] - p;
+          if ( linesz > 3 ) {
             switch ( unaligned<uint32_t>( p ) & 0xdfdfdfdf ) { /* 4 toupper */
             /*case NATS_KW_OK1:     // client side only
               case NATS_KW_OK2:     break;
@@ -224,14 +224,14 @@ EvNatsService::process( void ) noexcept
                   fl |= DO_ERR;
                   break;
                 }
-                if ( sz <= this->tmp_size ) {
-                  ::memcpy( this->buffer, p, sz );
+                if ( linesz <= this->tmp_size ) {
+                  ::memcpy( this->buffer, p, linesz );
                   size_start = &this->buffer[ size_start - p ];
                   p = this->buffer;
                 }
                 else {
-                  char *tmp = this->alloc( sz );
-                  ::memcpy( tmp, p, sz );
+                  char *tmp = this->alloc( linesz );
+                  ::memcpy( tmp, p, linesz );
                   size_start = &tmp[ size_start - p ];
                   p = tmp;
                 }
@@ -282,14 +282,14 @@ EvNatsService::process( void ) noexcept
                 fl |= verb_ok;
                 break;
               case NATS_KW_CONNECT:
-                this->parse_connect( p, sz );
+                this->parse_connect( p, linesz );
                 break;
               default:
                 break;
             }
           }
           p = &eol[ 1 ];
-          used += sz;
+          used += linesz;
           /*cmd_cnt++;*/
         }
         else { /* no end of line */
@@ -532,56 +532,58 @@ EvNatsService::on_msg( EvPublish &pub ) noexcept
 {
   bool flow_good = true;
 
-  if ( this->echo || (uint32_t) this->fd != pub.src_route ) {
-    for ( uint8_t cnt = 0; cnt < pub.prefix_cnt; cnt++ ) {
-      NatsStr       xsid;
-      NatsLookup    look;
-      NatsSubStatus status;
-      
-      if ( pub.subj_hash == pub.hash[ cnt ] ) {
-        NatsStr xsubj( pub.subject, pub.subject_len, pub.hash[ cnt ] );
-        status = this->map.lookup_publish( xsubj, look );
-        if ( status != NATS_NOT_FOUND ) {
-          for ( ; look.iter.get( xsid ); look.iter.incr() ) {
-            flow_good &= this->fwd_msg( pub, xsid.str, xsid.len );
-          }
-        }
-        if ( status == NATS_EXPIRED ) {
-          uint32_t h = pub.subj_hash;
-          if ( this->map.expire_publish( xsubj, look ) == NATS_EXPIRED ) {
-            uint32_t rcnt = 0;
-            /* check for duplicate hashes */
-            if ( this->map.sub_map.find_by_hash( h ) == NULL )
-              rcnt = this->poll.sub_route.del_sub_route( h, this->fd );
-            this->poll.notify_unsub( h, xsubj.str, xsubj.len,
-                                     this->fd, rcnt, 'N' );
-          }
+  /* if client does not want to see the msgs it published */
+  if ( ! this->echo && (uint32_t) this->fd == pub.src_route )
+    return true;
+
+  for ( uint8_t cnt = 0; cnt < pub.prefix_cnt; cnt++ ) {
+    NatsStr       xsid;
+    NatsLookup    look;
+    NatsSubStatus status;
+
+    if ( pub.subj_hash == pub.hash[ cnt ] ) {
+      NatsStr xsubj( pub.subject, pub.subject_len, pub.hash[ cnt ] );
+      status = this->map.lookup_publish( xsubj, look );
+      if ( status != NATS_NOT_FOUND ) {
+        for ( ; look.iter.get( xsid ); look.iter.incr() ) {
+          flow_good &= this->fwd_msg( pub, xsid.str, xsid.len );
         }
       }
-      else {
-        NatsWildRec * rt = NULL;
-        RouteLoc      loc;
-        uint32_t      h  = pub.hash[ cnt ];
-        rt = this->map.wild_map.find_by_hash( h, loc );
-        for (;;) {
-          if ( rt == NULL )
-            break;
-          if ( pcre2_match( rt->re, (const uint8_t *) pub.subject,
-                            pub.subject_len, 0, 0, rt->md, 0 ) == 1 ) {
-            NatsStr xsubj( rt->value, rt->len, rt->subj_hash );
-            status = this->map.lookup_publish( xsubj, look );
-            if ( status != NATS_NOT_FOUND ) {
-              for ( ; look.iter.get( xsid ); look.iter.incr() ) {
-                flow_good &= this->fwd_msg( pub, xsid.str, xsid.len );
-              }
-            }
-            if ( status == NATS_EXPIRED ) {
-              if ( this->map.expire_publish( xsubj, look ) == NATS_EXPIRED )
-                this->rem_wild( xsubj );
+      if ( status == NATS_EXPIRED ) {
+        uint32_t h = pub.subj_hash;
+        if ( this->map.expire_publish( xsubj, look ) == NATS_EXPIRED ) {
+          uint32_t rcnt = 0;
+          /* check for duplicate hashes */
+          if ( this->map.sub_map.find_by_hash( h ) == NULL )
+            rcnt = this->poll.sub_route.del_sub_route( h, this->fd );
+          this->poll.notify_unsub( h, xsubj.str, xsubj.len,
+                                   this->fd, rcnt, 'N' );
+        }
+      }
+    }
+    else {
+      NatsWildRec * rt = NULL;
+      RouteLoc      loc;
+      uint32_t      h  = pub.hash[ cnt ];
+      rt = this->map.wild_map.find_by_hash( h, loc );
+      for (;;) {
+        if ( rt == NULL )
+          break;
+        if ( pcre2_match( rt->re, (const uint8_t *) pub.subject,
+                          pub.subject_len, 0, 0, rt->md, 0 ) == 1 ) {
+          NatsStr xsubj( rt->value, rt->len, rt->subj_hash );
+          status = this->map.lookup_publish( xsubj, look );
+          if ( status != NATS_NOT_FOUND ) {
+            for ( ; look.iter.get( xsid ); look.iter.incr() ) {
+              flow_good &= this->fwd_msg( pub, xsid.str, xsid.len );
             }
           }
-          rt = this->map.wild_map.find_next_by_hash( h, loc );
+          if ( status == NATS_EXPIRED ) {
+            if ( this->map.expire_publish( xsubj, look ) == NATS_EXPIRED )
+              this->rem_wild( xsubj );
+          }
         }
+        rt = this->map.wild_map.find_next_by_hash( h, loc );
       }
     }
   }
@@ -666,6 +668,7 @@ EvNatsService::fwd_msg( EvPublish &pub,  const void *sid,
             this->msg_len );
 #endif
 
+#if 0
 static bool connect_parse_bool( const char *b ) { return *b == 't'; }
 static size_t connect_parse_string( const char *b, const char *e,  char *s,
                                     size_t max_sz ) {
@@ -691,90 +694,92 @@ static size_t connect_parse_string( const char *b, const char *e,  char *s,
 static int connect_parse_int( const char *b ) {
   return ( *b >= '0' && *b <= '9' ) ? ( *b - '0' ) : 0;
 }
+#endif
 
 void
-EvNatsService::parse_connect( const char *buf,  size_t sz ) noexcept
+EvNatsService::parse_connect( const char *buf,  size_t bufsz ) noexcept
 {
-  const char * start, * end, * p, * v, * comma;
-  char * strbuf = this->buffer, **ptr = NULL;
-  size_t used, buflen = sizeof( this->buffer );
+  const char * start, * end;/*, * p, * v, * comma;*/
 
-  /* find start and end {} */
-  if ( (start = (const char *) ::memchr( buf, '{', sz )) == NULL )
+  this->tmp_size = sizeof( this->buffer );
+  if ( (start = (const char *) ::memchr( buf, '{', bufsz )) == NULL )
     return;
-  sz -= start - buf;
-  for ( end = &start[ sz ]; end > start; )
+  bufsz -= start - buf;
+  for ( end = &start[ bufsz ]; end > start; )
     if ( *--end == '}' )
       break;
-  if ( end - start < 6 )
+
+  if ( end <= start )
     return;
-  /* CONNECT {\"user\":\"derek\",\"pass\":\"foo\",\"name\":\"router\"}\r\n */
-  for ( p = start; p < end; p = comma ) {
-    while ( *++p != '\"' ) /* field name */
-      if ( p == end )
-        goto finished;
-    /* p = start of field name, v = start of value, comma = end of value
-     * "user":"derek",
-     * ^     ^       ^
-     * |     |       |
-     * p     v       comma */
-    v = (const char *) ::memchr( &p[ 1 ], ':', end - &p[ 1 ] ); /* value */
-    if ( v == NULL || v - p < 6 ) /* field name must be at least 4 chars */
-      goto finished;
-    v++;
-    /* should scan string, ',' may occur in the value and split it */
-    comma = (const char *) ::memchr( v, ',', end - v );
-    if ( comma == NULL )
-      comma = end;
-    used = 0;
-    switch ( ( unaligned<uint32_t>( &p[ 1 ] ) ) & 0xdfdfdfdf ) {
-      case NATS_JS_VERBOSE:
-        this->verbose     = connect_parse_bool( v ); break;
-      case NATS_JS_PEDANTIC:
-        this->pedantic    = connect_parse_bool( v ); break;
-      case NATS_JS_TLS_REQUIRE:
-        this->tls_require = connect_parse_bool( v ); break;
-      case NATS_JS_ECHO:
-        this->echo        = connect_parse_bool( v ); break;
-      case NATS_JS_PROTOCOL:
-        this->protocol    = connect_parse_int( v ); break;
-      case NATS_JS_NAME:
-        used = connect_parse_string( v, comma, strbuf, buflen );
-        ptr  = &this->name;
-        break;
-      case NATS_JS_LANG:
-        used = connect_parse_string( v, comma, strbuf, buflen );
-        ptr  = &this->lang;
-        break;
-      case NATS_JS_VERSION:
-        used = connect_parse_string( v, comma, strbuf, buflen );
-        ptr  = &this->version;
-        break;
-      case NATS_JS_USER:
-        used = connect_parse_string( v, comma, strbuf, buflen );
-        ptr  = &this->user;
-        break;
-      case NATS_JS_PASS:
-        used = connect_parse_string( v, comma, strbuf, buflen );
-        ptr  = &this->pass;
-        break;
-      case NATS_JS_AUTH_TOKEN:
-        used = connect_parse_string( v, comma, strbuf, buflen );
-        ptr  = &this->auth_token;
-        break;
-      default: break;
+
+  MDMsgMem      mem;
+  JsonMsg     * msg;
+  MDFieldIter * iter;
+  MDName        name;
+  MDReference   mref;
+  msg = JsonMsg::unpack( (void *) start, 0, &end[ 1 ] - start, 0, NULL, &mem );
+  if ( msg == NULL )
+    return;
+  if ( msg->get_field_iter( iter ) != 0 )
+    return;
+  if ( iter->first() != 0 )
+    return;
+
+  do {
+    if ( iter->get_name( name ) == 0 ) {
+      if ( name.fnamelen <= 4 ) /* go:"str" */
+        continue;
+
+      switch ( ( unaligned<uint32_t>( name.fname ) ) & 0xdfdfdfdf ) {
+        case NATS_JS_VERBOSE: /* verbose:false */
+          if ( iter->get_reference( mref ) == 0 && mref.ftype == MD_BOOLEAN )
+            this->verbose = ( mref.fptr[ 0 ] != 0 );
+          break;
+        case NATS_JS_PEDANTIC: /* pedantic:false */
+          if ( iter->get_reference( mref ) == 0 && mref.ftype == MD_BOOLEAN )
+            this->pedantic = ( mref.fptr[ 0 ] != 0 );
+          break;
+        case NATS_JS_TLS_REQUIRE: /* tls_require:false */
+          if ( iter->get_reference( mref ) == 0 && mref.ftype == MD_BOOLEAN )
+            this->tls_require = ( mref.fptr[ 0 ] != 0 );
+          break;
+        case NATS_JS_ECHO: /* echo:false */
+          if ( iter->get_reference( mref ) == 0 && mref.ftype == MD_BOOLEAN )
+            this->echo = ( mref.fptr[ 0 ] != 0 );
+          break;
+        case NATS_JS_PROTOCOL: /* proto:1 */
+          if ( iter->get_reference( mref ) == 0 )
+            cvt_number( mref, this->protocol );
+          break;
+        case NATS_JS_NAME: /* name:"str" */
+          if ( iter->get_reference( mref ) == 0 && mref.ftype == MD_STRING )
+            this->name = this->save_string( mref.fptr, mref.fsize );
+          break;
+        case NATS_JS_LANG: /* lang:"C" */
+          if ( iter->get_reference( mref ) == 0 && mref.ftype == MD_STRING )
+            this->lang = this->save_string( mref.fptr, mref.fsize );
+          break;
+        case NATS_JS_VERSION: /* version:"str" */
+          if ( iter->get_reference( mref ) == 0 && mref.ftype == MD_STRING )
+            this->version = this->save_string( mref.fptr, mref.fsize );
+          break;
+        case NATS_JS_USER: /* user:"str" */
+          if ( iter->get_reference( mref ) == 0 && mref.ftype == MD_STRING )
+            this->user = this->save_string( mref.fptr, mref.fsize );
+          break;
+        case NATS_JS_PASS: /* pass:"str" */
+          if ( iter->get_reference( mref ) == 0 && mref.ftype == MD_STRING )
+            this->pass = this->save_string( mref.fptr, mref.fsize );
+          break;
+        case NATS_JS_AUTH_TOKEN: /* auth_token:"str" */
+          if ( iter->get_reference( mref ) == 0 && mref.ftype == MD_STRING )
+            this->auth_token = this->save_string( mref.fptr, mref.fsize );
+          break;
+        default:
+          break;
+      }
     }
-    if ( used > 0 ) {
-      buflen -= used; /* put these strings at the end of buffer[] */
-      ::memmove( &strbuf[ buflen ], strbuf, used );
-      *ptr    = &strbuf[ buflen ];
-    }
-  }
-finished:; /* update amount of buffer available */
-  /*printf( "verbose %s pedantic %s echo %s\n",
-           this->verbose ? "t" : "f", this->pedantic ? "t" : "f",
-           this->echo ? "t" : "f" );*/
-  this->tmp_size = buflen;
+  } while ( iter->next() == 0 );
 }
 
 void
