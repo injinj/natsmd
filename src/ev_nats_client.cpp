@@ -5,6 +5,7 @@
 #include <natsmd/ev_nats_client.h>
 #include <raikv/ev_publish.h>
 #include <raikv/kv_pubsub.h>
+#include <raikv/bit_iter.h>
 #include <raimd/json_msg.h>
 
 using namespace rai;
@@ -258,12 +259,13 @@ EvNatsClient::fwd_pub( void ) noexcept
                  this->fd, xsub.hash(),
                  this->msg_len_ptr, this->msg_len_digits,
                  MD_STRING, 'p' );
+  uint32_t  pmatch;
+  bool      flow = true;
   if ( this->msg_len == this->max_payload ||
        ! this->frags_pending.is_empty() ) {
     NatsTrailer trail( this->msg_ptr, this->msg_len );
     if ( trail.is_fragment( xsub.hash(), this->max_payload ) ) {
       NatsFragment *frag;
-      bool flow = true;
       if ( (frag = this->merge_fragment( trail, this->msg_ptr,
                                          this->msg_len )) != NULL ) {
         pub.msg_len        = frag->msg_len;
@@ -273,7 +275,16 @@ EvNatsClient::fwd_pub( void ) noexcept
         /*printf( "fwd_pub(%.*s) reply(%.*s)\n",
                 (int) pub.subject_len, pub.subject,
                 (int) pub.reply_len, (char *) pub.reply );*/
-        flow = this->poll.forward_msg( pub );
+        if ( this->sid[ 0 ] == '-' ) /* wild matches, check if another match */
+          pmatch = this->possible_matches( this->subject[ 0 ] );
+        else if ( this->test_wildcard_match( this->subject[ 0 ] ) )
+          pmatch = 2; /* normal subject and wildcard */
+        else
+          pmatch = 0; /* only the subject matches */
+        if ( pmatch <= 1 )
+          flow = this->poll.forward_msg( pub );
+        else
+          flow = this->deduplicate_wildcard( pub );
         delete frag;
       }
       return flow;
@@ -283,7 +294,53 @@ EvNatsClient::fwd_pub( void ) noexcept
     printf( "fwd_pub(%.*s) reply(%.*s)\n",
             (int) pub.subject_len, pub.subject,
             (int) pub.reply_len, (char *) pub.reply );
-  return this->poll.forward_msg( pub );
+  if ( this->sid[ 0 ] == '-' ) /* wild matches, check if another match */
+    pmatch = this->possible_matches( this->subject[ 0 ] );
+  else if ( this->test_wildcard_match( this->subject[ 0 ] ) )
+    pmatch = 2; /* normal subject and wildcard */
+  else
+    pmatch = 0; /* only the subject matches */
+  if ( pmatch <= 1 )
+    flow = this->poll.forward_msg( pub );
+  else
+    flow = this->deduplicate_wildcard( pub );
+  return flow;
+}
+/* multiple messages may be published for matching wildcards,
+ * for example, TEST.SUBJECT matches > and TEST.>, each with
+ * their own sid */
+bool
+EvNatsClient::deduplicate_wildcard( EvPublish &pub ) noexcept
+{
+  KvPrefHash pf[ 64 ];
+  size_t     pfcnt = 0;
+  BitIter64  bi( this->poll.sub_route.pat_mask );
+  uint32_t   hash,
+             max_sid = 0;
+  if ( bi.first() ) {
+    /* if didn't hash prefixes */
+    do {
+      if ( bi.i > this->subject_len )
+        break;
+      hash = this->poll.sub_route.prefix_seed( bi.i );
+      if ( bi.i > 0 )
+        hash = kv_crc_c( this->subject, bi.i, hash );
+      NatsPrefix *pref = this->pat_tab.find( hash, this->subject, bi.i );
+      if ( pref != NULL ) {
+        if ( this->sid[ 0 ] != '-' )
+          return true; /* matches */
+        if ( pref->sid > max_sid )
+          max_sid = pref->sid;
+      }
+      pf[ pfcnt ].pref = bi.i;
+      pf[ pfcnt ].set_hash( hash );
+      pfcnt++;
+    } while ( bi.next() );
+  }
+  if ( max_sid == 0 || (uint64_t) max_sid ==
+                       string_to_uint64( &this->sid[ 1 ], this->sid_len - 1 ) )
+    return this->poll.forward_msg( pub, NULL, pfcnt, pf );
+  return true;
 }
 
 NatsFragment *
@@ -576,17 +633,21 @@ EvNatsClient::on_psub( uint32_t h,  const char * /*pat*/,
       fwd = true;
   }
   if ( fwd ) {
-    uint32_t sid        = this->create_sid( h, prefix, prefix_len ),
-             sid_digits = uint32_digits( sid );
-    size_t   len        = 4 +               /* SUB */
-                          prefix_len + 2 +  /* <subject> + > */
-                          sid_digits + 2;   /* <sid>\r\n */
+    uint8_t w = ( prefix_len == 0 ? 0 : prefix[ 0 ] );
+    this->set_wildcard_match( w );
+    NatsPrefix * pat        = this->pat_tab.insert( h, prefix, prefix_len );
+    uint32_t     sid        = this->create_sid( h, prefix, prefix_len ),
+                 sid_digits = uint32_digits( sid );
+    size_t       len        = 4 +                 /* SUB */
+                              prefix_len + 2 +    /* <subject> + > */
+                              1 + sid_digits + 2; /* -<sid>\r\n */
     char *p = this->alloc( len ),
          *s = p;
+    pat->sid = sid;
     p = concat_hdr( p, "SUB ", 4 );
     if ( prefix_len > 0 )
       p = concat_hdr( p, prefix, prefix_len );
-    *p++ = '>'; *p++ = ' ';
+    *p++ = '>'; *p++ = ' '; *p++ = '-';
     uint32_to_string( sid, p, sid_digits );
     p = &p[ sid_digits ];
     *p++ = '\r'; *p++ = '\n';
@@ -613,13 +674,18 @@ EvNatsClient::on_punsub( uint32_t h,  const char * /*pat*/,
       fwd = true;
   }
   if ( fwd ) {
+    uint8_t w = ( prefix_len == 0 ? 0 : prefix[ 0 ] );
+    this->clear_wildcard_match( w );
+    this->pat_tab.remove( h, prefix, prefix_len );
+
     uint32_t sid        = this->remove_sid( h, prefix, prefix_len ),
              sid_digits = uint32_digits( sid );
-    size_t   len        = 6 +             /* UNSUB */
-                          sid_digits + 2; /* <sid>\r\n */
+    size_t   len        = 6 +                 /* UNSUB */
+                          1 + sid_digits + 2; /* -<sid>\r\n */
     char *p = this->alloc( len ),
          *s = p;
     p = concat_hdr( p, "UNSUB ", 6 );
+    *p++ = '-';
     uint32_to_string( sid, p, sid_digits );
     p = &p[ sid_digits ];
     *p++ = '\r'; *p++ = '\n';
@@ -763,6 +829,7 @@ EvNatsClient::release( void ) noexcept
     delete this->sid_collision_ht;
     this->sid_collision_ht = NULL;
   }
+  this->pat_tab.release();
   if ( this->notify != NULL )
     this->notify->on_shutdown( bytes_lost );
 }

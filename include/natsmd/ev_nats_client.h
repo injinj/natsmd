@@ -54,6 +54,19 @@ struct EvNatsClientNotify {
   virtual void on_shutdown( uint64_t bytes_lost ) noexcept;
 };
 
+struct NatsPrefix {
+  uint32_t hash;
+  uint32_t sid;
+  uint16_t len;
+  char     value[ 2 ];
+  bool equals( const void *s,  uint16_t l ) const {
+    return l == this->len && ::memcmp( s, this->value, l ) == 0;
+  }
+  void copy( const void *s,  uint16_t l ) {
+    ::memcpy( this->value, s, l );
+  }
+};
+
 struct EvNatsClient : public kv::EvConnection, public kv::RouteNotify {
   void * operator new( size_t, void *ptr ) { return ptr; }
   char       * msg_ptr;     /* ptr to the msg blob */
@@ -73,6 +86,7 @@ struct EvNatsClient : public kv::EvConnection, public kv::RouteNotify {
   uint8_t      protocol,       /* from INFO */
                fwd_all_msgs,   /* send publishes */
                fwd_all_subs;   /* send subscriptons */
+  uint32_t     wild_prefix_char[ 3 ]; /* first char of wildcard [ '!' -> 127 ] */
   size_t       max_payload;    /* 1024 * 1024 */
   const char * name,           /* CONNECT parm:  name="service" */
              * lang,                          /* lang="C" */
@@ -81,9 +95,11 @@ struct EvNatsClient : public kv::EvConnection, public kv::RouteNotify {
              * pass,                          /* pass="xxx" */
              * auth_token;                    /* auth_token="xxx" */
   kv::DLinkList<NatsFragment> frags_pending;
-  kv::UIntHashTab    * sid_ht;
-  kv::ULongHashTab   * sid_collision_ht;
-  EvNatsClientNotify * notify;
+  kv::UIntHashTab        * sid_ht;
+  kv::ULongHashTab       * sid_collision_ht;
+  EvNatsClientNotify     * notify;
+  kv::RouteVec<NatsPrefix> pat_tab; 
+  uint32_t wild_prefix_char_cnt[ 96 ];
 
   EvNatsClient( kv::EvPoll &p ) noexcept;
 
@@ -100,8 +116,34 @@ struct EvNatsClient : public kv::EvConnection, public kv::RouteNotify {
     this->msg_len_digits = 0;
     this->tmp_size = sizeof( this->buffer );
     this->next_sid = 1;
+    for ( int i = 0; i < 3; i++ )
+      this->wild_prefix_char[ i ] = 0;
+    for ( int j = 0; j < 96; j++ )
+      this->wild_prefix_char_cnt[ j ] = 0;
+  }
+  void set_wildcard_match( uint8_t c ) { /* 0 = all subjects */
+    uint8_t bit = ( c > ' ' ? ( ( c - ' ' ) & 0x5fU ) : 0 );
+    this->wild_prefix_char[ bit >> 5 ] |= 1U << ( bit & 31 );
+    this->wild_prefix_char_cnt[ bit ]++;
+  }
+  void clear_wildcard_match( uint8_t c ) {
+    uint8_t bit = ( c > ' ' ? ( ( c - ' ' ) & 0x5fU ) : 0 );
+    if ( --this->wild_prefix_char_cnt[ bit ] == 0 )
+      this->wild_prefix_char[ bit >> 5 ] &= ~( 1U << ( bit & 31 ) );
+  }
+  uint32_t possible_matches( uint8_t c ) const {
+    uint8_t bit = ( c - ' ' ) & 0x5fU;
+    return this->wild_prefix_char_cnt[ 0 ] +
+           this->wild_prefix_char_cnt[ bit ];
+  }
+  bool test_wildcard_match( uint8_t c ) const {
+    if ( ( this->wild_prefix_char[ 0 ] & 1 ) != 0 ) /* all subjects */
+      return true;
+    uint8_t bit = ( c - ' ' ) & 0x5fU;
+    return ( this->wild_prefix_char[ bit >> 5 ] & ( 1U << ( bit & 31 ) ) ) != 0;
   }
   bool fwd_pub( void ) noexcept;
+  bool deduplicate_wildcard( kv::EvPublish &pub ) noexcept;
   void parse_info( const char *info,  size_t infolen ) noexcept;
   void do_shutdown( void ) noexcept;
   NatsFragment *merge_fragment( NatsTrailer &trail,  const void *msg,
@@ -116,7 +158,6 @@ struct EvNatsClient : public kv::EvConnection, public kv::RouteNotify {
   static const uint32_t SID_COLLISION = 1U << 31;
   uint32_t create_sid( uint32_t h,  const char *sub,  size_t sublen ) noexcept;
   uint32_t remove_sid( uint32_t h,  const char *sub,  size_t sublen ) noexcept;
-
   /* RouteNotify */
   virtual void on_sub( uint32_t h,  const char *sub,  size_t sublen,
                        uint32_t src_fd,  uint32_t rcnt,  char src_type,
