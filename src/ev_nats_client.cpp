@@ -79,10 +79,8 @@ EvNatsClient::connect( const char *host,  int port,
     return false;
   this->initialize_state();
   if ( EvTcpConnection::connect( *this, host, port,
-                                 DEFAULT_TCP_CONNECT_OPTS ) != 0 ) {
-    fprintf( stderr, "create NATS socket failed\n" );
+                                 DEFAULT_TCP_CONNECT_OPTS ) != 0 )
     return false;
-  }
   return true;
 }
 
@@ -132,6 +130,8 @@ EvNatsClient::process( void ) noexcept
                   fl |= DO_ERR;
                   break;
                 }
+                /* the MSG header is buffered in case not enough data is
+                 * present and read() moves the buffer for more room */
                 if ( linesz <= this->tmp_size ) {
                   ::memcpy( this->buffer, p, linesz );
                   size_start = &this->buffer[ size_start - p ];
@@ -165,10 +165,12 @@ EvNatsClient::process( void ) noexcept
                 this->msg_state      = NATS_PUB_STATE;
                 break;
 
-              case NATS_KW_ERR:
+              case NATS_KW_ERR: /* put the last error in buffer[] */
                 fl |= DO_ERR;
                 fprintf( stderr, "%.*s", (int) linesz, p );
+                this->save_error( p, linesz );
                 break;
+
               case NATS_KW_PING:
                 this->append( pong, sizeof( pong ) - 1 );
                 fl |= HAS_PING;
@@ -185,7 +187,8 @@ EvNatsClient::process( void ) noexcept
           fl |= NEED_MORE;
         }
       }
-      else { /* msg_state == NATS_PUB_STATE */
+      /* this->msg_state == NATS_PUB_STATE, read message data */
+      else {
         if ( (size_t) ( end - p ) >= this->msg_len ) {
           this->msg_ptr = p;
           p = &p[ this->msg_len ];
@@ -203,14 +206,17 @@ EvNatsClient::process( void ) noexcept
           fl |= NEED_MORE;
         }
       }
+      /* if error occurs, shutdown read side, flush writes */
       if ( ( fl & DO_ERR ) != 0 ) {
         this->push( EV_SHUTDOWN );
         break;
       }
+      /* put back into read state, more data expected */
       if ( ( fl & NEED_MORE ) != 0 ) {
         this->pushpop( EV_READ, EV_READ_LO );
         break;
       }
+      /* write buffer immediately when ping or publish back pressure */
       if ( ( fl & ( FLOW_BACKPRESSURE | HAS_PING ) ) != 0 ) {
         this->off += used;
         if ( this->pending() > 0 )
@@ -221,6 +227,7 @@ EvNatsClient::process( void ) noexcept
       }
       fl = 0;
     }
+    /* consume used */
     this->off += used;
     if ( used == 0 || ( fl & NEED_MORE ) != 0 )
       goto break_loop;
@@ -228,6 +235,38 @@ EvNatsClient::process( void ) noexcept
 break_loop:;
   this->pop( EV_PROCESS );
   this->push_write();
+}
+
+void
+EvNatsClient::save_error( const char *buf,  size_t len ) noexcept
+{
+  /* trim whitespace */
+  while ( len > 0 && buf[ len - 1 ] <= ' ' )
+    len--;
+  /* skip -ERR if there is a description */
+  if ( len > 5 && ::memcmp( buf, "-ERR ", 5 ) == 0 ) {
+    buf = &buf[ 5 ];
+    len -= 5;
+  }
+  /* strip quotes */
+  if ( len > 2 && buf[ 0 ] == '\'' && buf[ len - 1 ] == '\'' ) {
+    buf++;
+    len -= 2;
+  }
+  if ( this->err_len > 0 )
+    this->tmp_size += this->err_len; /* free old error */
+  this->err_len = len;
+  if ( this->err_len > this->tmp_size )
+    this->err_len = this->tmp_size;
+  this->tmp_size -= this->err_len;
+
+  if ( this->err_len > 0 ) {
+    this->err = &this->buffer[ this->tmp_size ];
+    ::memcpy( this->err, buf, this->err_len );
+  }
+  else {
+    this->err = NULL;
+  }
 }
 
 static inline void
@@ -259,51 +298,45 @@ EvNatsClient::fwd_pub( void ) noexcept
                  this->fd, xsub.hash(),
                  this->msg_len_ptr, this->msg_len_digits,
                  MD_STRING, 'p' );
-  uint32_t  pmatch;
-  bool      flow = true;
+  uint32_t       pmatch;
+  bool           flow = true;
+  NatsFragment * frag = NULL;
+
+  /* if msg is at max_payload or a trailer fragment */
   if ( this->msg_len == this->max_payload ||
        ! this->frags_pending.is_empty() ) {
     NatsTrailer trail( this->msg_ptr, this->msg_len );
     if ( trail.is_fragment( xsub.hash(), this->max_payload ) ) {
-      NatsFragment *frag;
       if ( (frag = this->merge_fragment( trail, this->msg_ptr,
                                          this->msg_len )) != NULL ) {
         pub.msg_len        = frag->msg_len;
         pub.msg            = frag->msg_ptr();
         pub.msg_len_buf    = NULL;
         pub.msg_len_digits = 0;
-        /*printf( "fwd_pub(%.*s) reply(%.*s)\n",
-                (int) pub.subject_len, pub.subject,
-                (int) pub.reply_len, (char *) pub.reply );*/
-        if ( this->sid[ 0 ] == '-' ) /* wild matches, check if another match */
-          pmatch = this->possible_matches( this->subject[ 0 ] );
-        else if ( this->test_wildcard_match( this->subject[ 0 ] ) )
-          pmatch = 2; /* normal subject and wildcard */
-        else
-          pmatch = 0; /* only the subject matches */
-        if ( pmatch <= 1 )
-          flow = this->poll.forward_msg( pub );
-        else
-          flow = this->deduplicate_wildcard( pub );
-        delete frag;
       }
-      return flow;
+      else {
+        return true; /* partial message, wait for all frags */
+      }
     }
   }
   if ( nats_client_pub_verbose )
     printf( "fwd_pub(%.*s) reply(%.*s)\n",
             (int) pub.subject_len, pub.subject,
             (int) pub.reply_len, (char *) pub.reply );
-  if ( this->sid[ 0 ] == '-' ) /* wild matches, check if another match */
+  /* negative sids are wildcard matches */
+  if ( this->sid[ 0 ] == '-' ) /* wild matches, check if another wild match */
     pmatch = this->possible_matches( this->subject[ 0 ] );
   else if ( this->test_wildcard_match( this->subject[ 0 ] ) )
     pmatch = 2; /* normal subject and wildcard */
   else
-    pmatch = 0; /* only the subject matches */
+    pmatch = 1; /* only the subject matches */
+  /* if only one possible match, no need to deduplicate */
   if ( pmatch <= 1 )
     flow = this->poll.forward_msg( pub );
-  else
+  else /* multiple wildcards or a subject and a wildcard may match */
     flow = this->deduplicate_wildcard( pub );
+  if ( frag != NULL )
+    delete frag;
   return flow;
 }
 /* multiple messages may be published for matching wildcards,
@@ -317,6 +350,8 @@ EvNatsClient::deduplicate_wildcard( EvPublish &pub ) noexcept
   BitIter64  bi( this->poll.sub_route.pat_mask );
   uint32_t   hash,
              max_sid = 0;
+
+  /* bitmask of prefix lengths, 0 -> 63 chars */
   if ( bi.first() ) {
     /* if didn't hash prefixes */
     do {
@@ -327,69 +362,81 @@ EvNatsClient::deduplicate_wildcard( EvPublish &pub ) noexcept
         hash = kv_crc_c( this->subject, bi.i, hash );
       NatsPrefix *pref = this->pat_tab.find( hash, this->subject, bi.i );
       if ( pref != NULL ) {
-        if ( this->sid[ 0 ] != '-' )
-          return true; /* matches */
-        if ( pref->sid > max_sid )
+        if ( this->sid[ 0 ] != '-' ) /* not a wildcard sid */
+          return true; /* matches a wildcard, toss the subject publish */
+        if ( pref->sid > max_sid ) /* find the maximum sid */
           max_sid = pref->sid;
       }
+      /* track the prefix hashes, it is used by poll.forward_msg() */
       pf[ pfcnt ].pref = bi.i;
       pf[ pfcnt ].set_hash( hash );
       pfcnt++;
     } while ( bi.next() );
   }
+  /* if no wildcard matches or the maximum sid matches, forward */
   if ( max_sid == 0 || (uint64_t) max_sid ==
                        string_to_uint64( &this->sid[ 1 ], this->sid_len - 1 ) )
     return this->poll.forward_msg( pub, NULL, pfcnt, pf );
+  /* toss the publish, only forward the maximum sid */
   return true;
 }
-
+/* if message is a fragment, find and merge into other fragments */
 NatsFragment *
 EvNatsClient::merge_fragment( NatsTrailer &trail,  const void *msg,
                               size_t msg_len ) noexcept
 {
   NatsFragment *p;
+  /* all frags pending are in a list */
   for ( p = this->frags_pending.hd; p != NULL; p = p->next ) {
-    if ( p->src_id   == trail.src_id &&
-         p->src_time == trail.src_time &&
-         p->hash     == trail.hash &&
-         p->msg_len  == trail.msg_len )
+    if ( p->src_id   == trail.src_id &&   /* the source matches */
+         p->src_time == trail.src_time && /* the time the message created */
+         p->hash     == trail.hash &&     /* the subject hash */
+         p->msg_len  == trail.msg_len )   /* the total length of the message */
       break;
   }
+  /* if no frag matches, must be the first fragment */
   if ( p == NULL ) {
+    /* must start at 0 */
     if ( trail.off != 0 ) {
       fprintf( stderr, "fragment ignored, not starting at the head\n" );
       return NULL;
     }
+    /* must be larger than max_payload */
     if ( trail.msg_len < this->max_payload ) {
       fprintf( stderr, "fragment ignored, msg_len %u is less than payload\n",
                trail.msg_len );
       return NULL;
     }
+    /* allocate space for entire message */
     void *m = ::malloc( trail.msg_len + sizeof( NatsFragment ) );
     if ( m == NULL ) {
       fprintf( stderr, "can't allocated fragment size %u\n", trail.msg_len );
     }
+    /* push onto frag list */
     p = new ( m ) NatsFragment( trail.src_id, trail.src_time, trail.hash,
                                 trail.msg_len );
     this->frags_pending.push_hd( p );
   }
+  /* frags are published in offset order */
   if ( trail.off != p->off ) {
     fprintf( stderr, "fragment offset %u:%u missing data\n", trail.off, p->off );
     this->frags_pending.pop( p );
     delete p;
     return NULL;
   }
+  /* merge fragment */
   uint8_t * frag_msg  = (uint8_t *) p->msg_ptr();
   size_t    frag_size = msg_len - sizeof( NatsTrailer );
   ::memcpy( &frag_msg[ trail.off ], msg, frag_size );
   p->off += frag_size;
+  /* if all fragments are recvd */
   if ( p->off == p->msg_len ) {
     this->frags_pending.pop( p );
     return p;
   }
   return NULL;
 }
-
+/* clear fragmens on shutdown */
 void
 EvNatsClient::release_fragments( void ) noexcept
 {
@@ -402,14 +449,14 @@ EvNatsClient::release_fragments( void ) noexcept
     this->frags_pending.init();
   }
 }
-
+/* used to create a message */
 static inline char *
 concat_hdr( char *p,  const char *q,  size_t sz )
 {
   do { *p++ = *q++; } while ( --sz > 0 );
   return p;
 }
-
+/* published subject wildcards X.*.Z and X.> are encoded as X.+.Z and X.< */
 static inline char *
 encode_sub( char *p,  const char *q,  size_t sz )
 {
@@ -429,7 +476,7 @@ encode_sub( char *p,  const char *q,  size_t sz )
   } while ( --sz > 0 );
   return p;
 }
-
+/* forward a publish to the NATS network */
 bool
 EvNatsClient::on_msg( EvPublish &pub ) noexcept
 {
@@ -442,6 +489,7 @@ EvNatsClient::on_msg( EvPublish &pub ) noexcept
     printf( "on_msg(%.*s) reply(%.*s)\n",
             (int) pub.subject_len, pub.subject,
             (int) pub.reply_len, (char *) pub.reply );
+  /* construct PUB subject <reply> <length \r\n <blob> */
   if ( pub.msg_len <= this->max_payload ) {
     msg_len_digits =
              ( pub.msg_len_digits > 0 ? pub.msg_len_digits :
@@ -472,6 +520,7 @@ EvNatsClient::on_msg( EvPublish &pub ) noexcept
 
     this->sz += len;
   }
+  /* fragment PUB into multiple messages, each with the same subject */
   else {
     NatsTrailer trail( this->poll.create_ns(),
                        this->poll.current_coarse_ns(),
@@ -522,7 +571,8 @@ EvNatsClient::on_msg( EvPublish &pub ) noexcept
   this->idle_push( flow ? EV_WRITE : EV_WRITE_HI );
   return flow;
 }
-
+/* hash subject to insert sid into sid_ht,
+ * if collision, use hash64 in sid_collsion_ht */
 uint32_t
 EvNatsClient::create_sid( uint32_t h, const char *sub, size_t sublen ) noexcept
 {
@@ -538,29 +588,33 @@ EvNatsClient::create_sid( uint32_t h, const char *sub, size_t sublen ) noexcept
          this->sid_collision_ht->need_resize() )
       this->sid_collision_ht = ULongHashTab::resize( this->sid_collision_ht );
     this->sid_collision_ht->upsert( h64, sid );
-    this->sid_ht->set( h, pos, v | SID_COLLISION );
+    this->sid_ht->set( h, pos, v | SID_COLLISION ); /* mark as collision */
   }
   return sid;
 }
-
+/* find sid of subject and remove it */
 uint32_t
 EvNatsClient::remove_sid( uint32_t h, const char *sub, size_t sublen ) noexcept
 {
   uint32_t pos, sid;
+  /* it must be in sid_ht */
   if ( this->sid_ht == NULL || ! this->sid_ht->find( h, pos, sid ) ) {
     fprintf( stderr, "sub %.*s not subscribed\n", (int) sublen, sub );
     return 0; /* not a valid sid */
   }
-  if ( ( sid & SID_COLLISION ) == 0 )
+  if ( ( sid & SID_COLLISION ) == 0 ) /* no collision, remove */
     this->sid_ht->remove( pos );
   else {
     uint64_t h64 = kv_hash_murmur64( sub, sublen, 0 ),
              pos64, v64;
+    /* if not found at hash64, then it is the hash */
     if ( this->sid_collision_ht == NULL ||
          ! this->sid_collision_ht->find( h64, pos64, v64 ) ) {
+      /* clear the sid, but keep the collision mark */
       this->sid_ht->set( h, pos, SID_COLLISION );
       sid &= ~SID_COLLISION;
     }
+    /* found at hash64, remove that */
     else {
       this->sid_collision_ht->remove( pos64 );
       sid = v64;
@@ -568,7 +622,7 @@ EvNatsClient::remove_sid( uint32_t h, const char *sub, size_t sublen ) noexcept
   }
   return sid;
 }
-
+/* forward subscribe subject: SUB subject sid */
 void
 EvNatsClient::on_sub( uint32_t h,  const char *sub,  size_t sublen,
                       uint32_t /*fd*/,  uint32_t rcnt,  char /*tp*/,
@@ -594,7 +648,7 @@ EvNatsClient::on_sub( uint32_t h,  const char *sub,  size_t sublen,
     this->idle_push( EV_WRITE );
   }
 }
-
+/* forward unsubscribe subject: UNSUB sid */
 void
 EvNatsClient::on_unsub( uint32_t h,  const char *sub,  size_t sublen,
                         uint32_t /*fd*/,  uint32_t rcnt, char /*tp*/) noexcept
@@ -616,7 +670,7 @@ EvNatsClient::on_unsub( uint32_t h,  const char *sub,  size_t sublen,
     this->idle_push( EV_WRITE );
   }
 }
-
+/* forward pattern subscribe: SUB wildcard -sid */
 void
 EvNatsClient::on_psub( uint32_t h,  const char * /*pat*/,
                        size_t /*patlen*/,  const char *prefix,
@@ -634,7 +688,7 @@ EvNatsClient::on_psub( uint32_t h,  const char * /*pat*/,
   }
   if ( fwd ) {
     uint8_t w = ( prefix_len == 0 ? 0 : prefix[ 0 ] );
-    this->set_wildcard_match( w );
+    this->set_wildcard_match( w ); /* track first char of wildcards */
     NatsPrefix * pat        = this->pat_tab.insert( h, prefix, prefix_len );
     uint32_t     sid        = this->create_sid( h, prefix, prefix_len ),
                  sid_digits = uint32_digits( sid );
@@ -657,7 +711,7 @@ EvNatsClient::on_psub( uint32_t h,  const char * /*pat*/,
     this->idle_push( EV_WRITE );
   }
 }
-
+/* forward pattern unsubscribe: UNSUB -sid */
 void
 EvNatsClient::on_punsub( uint32_t h,  const char * /*pat*/,
                          size_t /*patlen*/,  const char *prefix,
@@ -695,18 +749,10 @@ EvNatsClient::on_punsub( uint32_t h,  const char * /*pat*/,
     this->idle_push( EV_WRITE );
   }
 }
-#if 0
-static int info_parse_int( const char *b ) {
-  return ( *b >= '0' && *b <= '9' ) ? ( *b - '0' ) : 0;
-}
-
-static size_t info_parse_size( const char *b ) {
-  size_t sz = 0;
-  while ( *b >= '0' && *b <= '9' )
-    sz = sz * 10 + (size_t) ( *b++ - '0' );
-  return sz;
-}
-#endif
+/* parse json formatted message:
+ * INFO { server_id:"id",server_name:"svr",go:"1.0",max_payload:size ... }
+ * then forward a connect message:
+ * CONNECT { name:"nm",user:"u",pass:"p" ... } */
 void
 EvNatsClient::parse_info( const char *buf,  size_t bufsz ) noexcept
 {
@@ -714,7 +760,6 @@ EvNatsClient::parse_info( const char *buf,  size_t bufsz ) noexcept
 
   if ( nats_client_info_verbose )
     printf( "%.*s", (int) bufsz, buf );
-  /* CONNECT {\"user\":\"derek\",\"pass\":\"foo\",\"name\":\"router\"}\r\n */
   if ( (start = (const char *) ::memchr( buf, '{', bufsz )) != NULL ) {
     bufsz -= start - buf;
     for ( end = &start[ bufsz ]; end > start; )
@@ -736,6 +781,7 @@ EvNatsClient::parse_info( const char *buf,  size_t bufsz ) noexcept
               if ( iter->get_name( name ) == 0 ) {
                 if ( name.fnamelen <= 4 ) /* "go:"str" */
                   continue;
+                /* need max payload */
                 switch ( ( unaligned<uint32_t>( name.fname ) ) & 0xdfdfdfdf ) {
                   case NATS_JS_MAX_PAYLOAD: /* max_payload:1048576 */
                     if ( iter->get_reference( mref ) == 0 )
@@ -796,19 +842,23 @@ EvNatsClient::parse_info( const char *buf,  size_t bufsz ) noexcept
   if ( nats_client_cmd_verbose )
     printf( "%.*s", len, outbuf );
   this->append( outbuf, len );
+  /* if all subs are forwarded to NATS */
   if ( this->fwd_all_subs )
     this->poll.add_route_notify( *this );
+  /* if all msgs are forwarded to NATS */
   if ( this->fwd_all_msgs ) {
     uint32_t h = this->poll.sub_route.prefix_seed( 0 );
     this->poll.sub_route.add_pattern_route( h, this->fd, 0 );
   }
+  /* done, notify connected, may be -ERR later if conn fails to authenticate */
   if ( this->notify != NULL )
     this->notify->on_connect();
 }
 /* notifications */
 void EvNatsClientNotify::on_connect( void ) noexcept {}
-void EvNatsClientNotify::on_shutdown( uint64_t ) noexcept {}
-
+void EvNatsClientNotify::on_shutdown( uint64_t,  const char *,
+                                      size_t ) noexcept {}
+/* after closed, release memory used by protocol */
 void
 EvNatsClient::release( void ) noexcept
 {
@@ -831,6 +881,6 @@ EvNatsClient::release( void ) noexcept
   }
   this->pat_tab.release();
   if ( this->notify != NULL )
-    this->notify->on_shutdown( bytes_lost );
+    this->notify->on_shutdown( bytes_lost, this->err, this->err_len );
 }
 
