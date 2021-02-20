@@ -190,6 +190,7 @@ struct EvNatsClient : public kv::EvConnection, public kv::RouteNotify {
   uint32_t remove_sid( uint32_t h,  const char *sub,  size_t sublen ) noexcept;
   /* RouteNotify */
   /* a new subscription */
+  void do_sub( uint32_t h,  const char *sub,  size_t sublen ) noexcept;
   virtual void on_sub( uint32_t h,  const char *sub,  size_t sublen,
                        uint32_t src_fd,  uint32_t rcnt,  char src_type,
                        const char *rep,  size_t rlen ) noexcept;
@@ -198,6 +199,7 @@ struct EvNatsClient : public kv::EvConnection, public kv::RouteNotify {
                          uint32_t src_fd,  uint32_t rcnt,
                          char src_type ) noexcept;
   /* a new pattern subscription */
+  void do_psub( uint32_t h,  const char *prefix,  uint8_t prefix_len ) noexcept;
   virtual void on_psub( uint32_t h,  const char *pattern,  size_t patlen,
                         const char *prefix,  uint8_t prefix_len,
                         uint32_t src_fd,  uint32_t rcnt,
@@ -207,6 +209,9 @@ struct EvNatsClient : public kv::EvConnection, public kv::RouteNotify {
                           const char *prefix,  uint8_t prefix_len,
                           uint32_t src_fd,  uint32_t rcnt,
                           char src_type ) noexcept;
+  /* reassert subs after reconnect */
+  virtual void on_reassert( uint32_t fd,  kv::RouteVec<kv::RouteSub> &sub_db,
+                            kv::RouteVec<kv::RouteSub> &pat_db ) noexcept;
 };
 
 }
