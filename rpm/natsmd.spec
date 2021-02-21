@@ -58,7 +58,7 @@ rm -rf %{buildroot}
 %{_includedir}/*
 
 %post
-echo "${RPM_INSTALL_PREFIX}/lib64" > /etc/ld.so.conf.d/%{name}.conf
+echo "%{_prefix}/lib64" > /etc/ld.so.conf.d/%{name}.conf
 /sbin/ldconfig
 
 %postun
