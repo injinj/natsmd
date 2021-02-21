@@ -125,7 +125,7 @@ endif
 
 natsmd_lib  := $(libd)/libnatsmd.a
 rpath       := -Wl,-rpath,$(pwd)/$(libd)$(rpath1)$(rpath2)$(rpath3)$(rpath4)$(rpath5)$(rpath6)$(rpath7)
-dlnk_lib    += -lpcre2-8 -lcrypto
+dlnk_lib    += -lpcre28
 malloc_lib  :=
 
 .PHONY: everything
