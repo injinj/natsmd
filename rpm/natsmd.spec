@@ -2,7 +2,7 @@ Name:		natsmd
 Version:	999.999
 Vendor:	        Rai Technology, Inc
 Release:	99999%{?dist}
-Summary:	Rai distribution services
+Summary:	Rai Nats
 
 License:	ASL 2.0
 URL:		https://github.com/raitechnology/%{name}
@@ -16,10 +16,12 @@ BuildRequires:  raikv
 BuildRequires:  raimd
 BuildRequires:  libdecnumber
 BuildRequires:  pcre2-devel
+BuildRequires:  hdrhist
 Requires:       raikv
 Requires:       raimd
 Requires:       libdecnumber
 Requires:       pcre2
+Requires:       hdrhist
 Requires(post): /sbin/ldconfig
 Requires(postun): /sbin/ldconfig
 
@@ -51,9 +53,9 @@ rm -rf %{buildroot}
 
 %files
 %defattr(-,root,root,-)
-/usr/bin/*
-/usr/lib64/*
-/usr/include/*
+%{_bindir}/*
+%{_prefix}/lib64/*
+%{_includedir}/*
 
 %post
 echo "${RPM_INSTALL_PREFIX}/lib64" > /etc/ld.so.conf.d/%{name}.conf

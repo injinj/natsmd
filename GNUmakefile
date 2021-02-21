@@ -65,6 +65,7 @@ thread_lib  := -pthread -lrt
 have_md_submodule    := $(shell if [ -f ./raimd/GNUmakefile ]; then echo yes; else echo no; fi )
 have_dec_submodule   := $(shell if [ -f ./raimd/libdecnumber/GNUmakefile ]; then echo yes; else echo no; fi )
 have_kv_submodule    := $(shell if [ -f ./raikv/GNUmakefile ]; then echo yes; else echo no; fi )
+have_hdr_submodule   := $(shell if [ -f ./HdrHistogram_c/GNUmakefile ]; then echo yes; else echo no; fi )
 
 lnk_lib     :=
 dlnk_lib    :=
@@ -111,6 +112,17 @@ lnk_lib     += -ldecnumber
 dlnk_lib    += -ldecnumber
 endif
 
+ifeq (yes,$(have_hdr_submodule))
+hdr_lib     := HdrHistogram_c/$(libd)/libhdrhist.a
+hdr_dll     := HdrHistogram_c/$(libd)/libhdrhist.so
+rpath2       = ,-rpath,$(pwd)/HdrHistogram_c/$(libd)
+hdr_includes = -IHdrHistogram_c/src
+else
+hdr_lib     := -lhdrhist
+hdr_includes = -I/usr/include/hdrhist
+endif
+
+
 natsmd_lib  := $(libd)/libnatsmd.a
 rpath       := -Wl,-rpath,$(pwd)/$(libd)$(rpath1)$(rpath2)$(rpath3)$(rpath4)$(rpath5)$(rpath6)$(rpath7)
 dlnk_lib    += -lpcre2-8 -lcrypto
@@ -147,6 +159,14 @@ $(md_lib) $(md_dll):
 clean_md:
 	$(MAKE) -C raimd clean
 clean_subs += clean_md
+endif
+ifeq (yes,$(have_hdr_submodule))
+$(hdr_lib) $(hdr_dll):
+	$(MAKE) -C HdrHistogram_c
+.PHONY: clean_hdr
+clean_hdr:
+	$(MAKE) -C HdrHistogram_c clean
+clean_subs += clean_hdr
 endif
 
 # copr/fedora build (with version env vars)
@@ -193,14 +213,14 @@ all_exes    += $(bind)/natsmd_server
 all_depends += $(natsmd_server_deps)
 server_defines := -DNATSMD_VER=$(ver_build)
 
-ping_nats_includes := -IHdrHistogram_c/src
+ping_nats_includes := $(hdr_includes)
 ping_nats_defines  := -Wno-unused-function
 
 ping_nats_files := ping_nats
 ping_nats_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(ping_nats_files)))
 ping_nats_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(ping_nats_files)))
-ping_nats_libs  := 
-ping_nats_lnk   := $(lnk_lib) HdrHistogram_c/$(libd)/libhdrhist.a
+ping_nats_libs  :=
+ping_nats_lnk   := $(lnk_lib) $(hdr_lib)
 
 $(bind)/ping_nats: $(ping_nats_objs) $(ping_nats_libs) $(lnk_dep)
 
@@ -251,9 +271,10 @@ $(dependd)/depend.make: $(dependd) $(all_depends)
 	@cat $(all_depends) >> $(dependd)/depend.make
 
 .PHONY: dist_bins
-dist_bins: $(all_libs) $(bind)/natsmd_server
+dist_bins: $(all_libs) $(all_dlls) $(bind)/natsmd_server $(bind)/ping_nats
 	chrpath -d $(libd)/libnatsmd.so
 	chrpath -d $(bind)/natsmd_server
+	chrpath -d $(bind)/ping_nats
 
 .PHONY: dist_rpm
 dist_rpm: srpm
