@@ -24,16 +24,7 @@ static int
 getenv_bool( const char *var )
 {
   const char *val = ::getenv( var );
-  if ( val == NULL )
-    return 0;
-  if ( ::strcmp( val, "false" ) != 0 &&
-       ::strcmp( val, "0" ) != 0 &&
-       ::strcmp( val, "no" ) != 0 &&
-       ::strcmp( val, "off" ) != 0 ) {
-    printf( "%s is on\n", var );
-    return 1;
-  }
-  return 0;
+  return val != NULL && val[ 0 ] != 'f' && val[ 0 ] != '0';
 }
 
 EvNatsClient::EvNatsClient( EvPoll &p ) noexcept
@@ -649,33 +640,33 @@ EvNatsClient::on_sub( uint32_t h,  const char *sub,  size_t sublen,
                       uint32_t /*fd*/,  uint32_t rcnt,  char /*tp*/,
                       const char * /*rep*/,  size_t /*rlen*/) noexcept
 {
-  if ( rcnt == 1 ) {
-    this->do_sub( h, sub, sublen );
-    this->idle_push( EV_WRITE );
-  }
+  if ( rcnt != 1 ) /* if first route established */
+    return;
+  this->do_sub( h, sub, sublen );
+  this->idle_push( EV_WRITE );
 }
 /* forward unsubscribe subject: UNSUB sid */
 void
 EvNatsClient::on_unsub( uint32_t h,  const char *sub,  size_t sublen,
                         uint32_t /*fd*/,  uint32_t rcnt, char /*tp*/) noexcept
 {
-  if ( rcnt == 0 ) {
-    uint32_t sid        = this->remove_sid( h, sub, sublen ),
-             sid_digits = uint32_digits( sid );
-    if ( sid != 0 ) {
-      size_t   len = 6 +             /* UNSUB */
-                     sid_digits + 2; /* <sid>\r\n */
-      char *p = this->alloc( len ),
-           *s = p;
-      p = concat_hdr( p, "UNSUB ", 6 );
-      uint32_to_string( sid, p, sid_digits );
-      p = &p[ sid_digits ];
-      *p++ = '\r'; *p++ = '\n';
-      if ( nats_client_sub_verbose )
-        printf( "%.*s", (int) len, s );
-      this->sz += len;
-      this->idle_push( EV_WRITE );
-    }
+  if ( rcnt != 0 ) /* if no routes left */
+    return;
+  uint32_t sid        = this->remove_sid( h, sub, sublen ),
+           sid_digits = uint32_digits( sid );
+  if ( sid != 0 ) {
+    size_t   len = 6 +             /* UNSUB */
+                   sid_digits + 2; /* <sid>\r\n */
+    char *p = this->alloc( len ),
+         *s = p;
+    p = concat_hdr( p, "UNSUB ", 6 );
+    uint32_to_string( sid, p, sid_digits );
+    p = &p[ sid_digits ];
+    *p++ = '\r'; *p++ = '\n';
+    if ( nats_client_sub_verbose )
+      printf( "%.*s", (int) len, s );
+    this->sz += len;
+    this->idle_push( EV_WRITE );
   }
 }
 /* forward pattern subscribe: SUB wildcard -sid */
@@ -726,10 +717,10 @@ EvNatsClient::on_psub( uint32_t h,  const char * /*pat*/,
     if ( prefix_len == 0 ) /* EvNatsClient is subscribed to > */
       fwd = true;
   }
-  if ( fwd ) {
-    this->do_psub( h, prefix, prefix_len );
-    this->idle_push( EV_WRITE );
-  }
+  if ( ! fwd )
+    return;
+  this->do_psub( h, prefix, prefix_len );
+  this->idle_push( EV_WRITE );
 }
 /* forward pattern unsubscribe: UNSUB -sid */
 void
@@ -747,28 +738,28 @@ EvNatsClient::on_punsub( uint32_t h,  const char * /*pat*/,
     if ( prefix_len == 0 ) /* EvNatsClient is subscribed to > */
       fwd = true;
   }
-  if ( fwd ) {
-    uint32_t sid        = this->remove_sid( h, prefix, prefix_len ),
-             sid_digits = uint32_digits( sid );
-    if ( sid != 0 ) {
-      uint8_t w = ( prefix_len == 0 ? 0 : prefix[ 0 ] );
-      this->clear_wildcard_match( w );
-      this->pat_tab.remove( h, prefix, prefix_len );
+  if ( ! fwd )
+    return;
+  uint32_t sid        = this->remove_sid( h, prefix, prefix_len ),
+           sid_digits = uint32_digits( sid );
+  if ( sid != 0 ) {
+    uint8_t w = ( prefix_len == 0 ? 0 : prefix[ 0 ] );
+    this->clear_wildcard_match( w );
+    this->pat_tab.remove( h, prefix, prefix_len );
 
-      size_t   len        = 6 +                 /* UNSUB */
-                            1 + sid_digits + 2; /* -<sid>\r\n */
-      char *p = this->alloc( len ),
-           *s = p;
-      p = concat_hdr( p, "UNSUB ", 6 );
-      *p++ = '-';
-      uint32_to_string( sid, p, sid_digits );
-      p = &p[ sid_digits ];
-      *p++ = '\r'; *p++ = '\n';
-      this->sz += len;
-      if ( nats_client_sub_verbose )
-        printf( "%.*s", (int) len, s );
-      this->idle_push( EV_WRITE );
-    }
+    size_t   len        = 6 +                 /* UNSUB */
+                          1 + sid_digits + 2; /* -<sid>\r\n */
+    char *p = this->alloc( len ),
+         *s = p;
+    p = concat_hdr( p, "UNSUB ", 6 );
+    *p++ = '-';
+    uint32_to_string( sid, p, sid_digits );
+    p = &p[ sid_digits ];
+    *p++ = '\r'; *p++ = '\n';
+    this->sz += len;
+    if ( nats_client_sub_verbose )
+      printf( "%.*s", (int) len, s );
+    this->idle_push( EV_WRITE );
   }
 }
 
