@@ -158,8 +158,9 @@ current_time_nsecs( void )
 int
 main( int argc, char **argv )
 {
-  const char * ne = get_arg( argc, argv, 1, "-n", 0 ),
+  const char * ne = get_arg( argc, argv, 1, "-n", "127.0.0.1" ),
              * po = get_arg( argc, argv, 1, "-p", "4222" ),
+             * us = get_arg( argc, argv, 1, "-u", "chris" ),
              * ct = get_arg( argc, argv, 1, "-c", 0 ),
              * re = get_arg( argc, argv, 0, "-r", 0 ),
              /** bu = get_arg( argc, argv, 0, "-b", 0 ),*/
@@ -168,9 +169,10 @@ main( int argc, char **argv )
   
   if ( he != NULL || ne == NULL ) {
     fprintf( stderr,
-             "%s -n network [-r] [-c count]\n"
+             "%s [-n network] [-p port] [-u user] [-r] [-c count]\n"
              "  -n network = network to ping\n"
              "  -p port    = port to ping\n"
+             "  -u user    = user to connect\n"
              "  -r         = reflect pings\n"
              "  -b         = busy wait\n"
              "  -c count   = number of pings\n", argv[ 0 ] );
@@ -216,12 +218,14 @@ main( int argc, char **argv )
       if ( msg[ msglen - 1 ] == '\n' ) {
         if ( ! connected ) {
           static char conn[] = "CONNECT {"
-                                 "\"user\":\"chris\","
+                                 "\"user\":\"%s\","
                                  "\"name\":\"ping\","
                                  "\"verbose\":false,"
                                  "\"echo\":false"
                                "}\r\n";
-          data.send( conn, sizeof( conn ) - 1 );
+          char buf[ 1024 ];
+          size_t len = ::snprintf( buf, sizeof( buf ), conn, us );
+          data.send( buf, len );
           connected = true;
         }
       }
