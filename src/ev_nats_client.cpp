@@ -32,7 +32,7 @@ EvNatsClient::EvNatsClient( EvPoll &p ) noexcept
       next_sid( 1 ), protocol( 1 ), fwd_all_msgs( 1 ), fwd_all_subs( 1 ),
       max_payload( 1024 * 1024 ), name( 0 ),
       lang( 0 ), version( 0 ), user( 0 ), pass( 0 ), auth_token( 0 ),
-      sid_ht( 0 ), sid_collision_ht( 0 ), notify( 0 )
+      sid_ht( 0 )
 {
   if ( ! nats_client_init ) {
     nats_client_init = 1;
@@ -62,16 +62,22 @@ EvNatsClient::create_nats_client( EvPoll &p ) noexcept
 }
 
 bool
-EvNatsClient::connect( const char *host,  int port,
-                       EvNatsClientNotify *n ) noexcept
+EvNatsClient::connect( EvNatsClientParameters &p,
+                       EvConnectionNotify *n ) noexcept
 {
-  this->notify = n;
   if ( this->fd != -1 )
     return false;
   this->initialize_state();
-  if ( EvTcpConnection::connect( *this, host, port,
+  if ( EvTcpConnection::connect( *this, p.host, p.port,
                                  DEFAULT_TCP_CONNECT_OPTS ) != 0 )
     return false;
+  this->name       = p.name;
+  this->lang       = p.lang;
+  this->version    = p.version;
+  this->user       = p.user;
+  this->pass       = p.pass;
+  this->auth_token = p.auth_token;
+  this->notify     = n;
   return true;
 }
 
@@ -567,19 +573,15 @@ EvNatsClient::on_msg( EvPublish &pub ) noexcept
 uint32_t
 EvNatsClient::create_sid( uint32_t h, const char *sub, size_t sublen ) noexcept
 {
-  uint32_t sid = this->next_sid++,
-           pos, v;
+  SidHash  hash( h, sub, sublen );
+  size_t   pos;
+  uint32_t sid;
+
   if ( this->sid_ht == NULL || this->sid_ht->need_resize() )
-    this->sid_ht = UIntHashTab::resize( this->sid_ht );
-  if ( ! this->sid_ht->find( h, pos, v ) )
-    this->sid_ht->set( h, pos, sid );
-  else {
-    uint64_t h64 = kv_hash_murmur64( sub, sublen, 0 );
-    if ( this->sid_collision_ht == NULL ||
-         this->sid_collision_ht->need_resize() )
-      this->sid_collision_ht = ULongHashTab::resize( this->sid_collision_ht );
-    this->sid_collision_ht->upsert( h64, sid );
-    this->sid_ht->set( h, pos, v | SID_COLLISION ); /* mark as collision */
+    this->sid_ht = SidHashTab::resize( this->sid_ht );
+  if ( ! this->sid_ht->find( hash, pos, sid ) ) {
+    sid = this->next_sid++;
+    this->sid_ht->set( hash, pos, sid );
   }
   return sid;
 }
@@ -587,30 +589,15 @@ EvNatsClient::create_sid( uint32_t h, const char *sub, size_t sublen ) noexcept
 uint32_t
 EvNatsClient::remove_sid( uint32_t h, const char *sub, size_t sublen ) noexcept
 {
-  uint32_t pos, sid;
+  SidHash  hash( h, sub, sublen );
+  size_t   pos;
+  uint32_t sid;
   /* it must be in sid_ht */
-  if ( this->sid_ht == NULL || ! this->sid_ht->find( h, pos, sid ) ) {
+  if ( this->sid_ht == NULL || ! this->sid_ht->find( hash, pos, sid ) ) {
     fprintf( stderr, "sub %.*s not subscribed\n", (int) sublen, sub );
     return 0; /* not a valid sid */
   }
-  if ( ( sid & SID_COLLISION ) == 0 ) /* no collision, remove */
-    this->sid_ht->remove( pos );
-  else {
-    uint64_t h64 = kv_hash_murmur64( sub, sublen, 0 ),
-             pos64, v64;
-    /* if not found at hash64, then it is the hash */
-    if ( this->sid_collision_ht == NULL ||
-         ! this->sid_collision_ht->find( h64, pos64, v64 ) ) {
-      /* clear the sid, but keep the collision mark */
-      this->sid_ht->set( h, pos, SID_COLLISION );
-      sid &= ~SID_COLLISION;
-    }
-    /* found at hash64, remove that */
-    else {
-      this->sid_collision_ht->remove( pos64 );
-      sid = v64;
-    }
-  }
+  this->sid_ht->remove( pos );
   return sid;
 }
 /* forward subscribe subject: SUB subject sid */
@@ -882,35 +869,26 @@ EvNatsClient::parse_info( const char *buf,  size_t bufsz ) noexcept
   }
   /* done, notify connected, may be -ERR later if conn fails to authenticate */
   if ( this->notify != NULL )
-    this->notify->on_connect();
+    this->notify->on_connect( *this );
 }
-/* notifications */
-void EvNatsClientNotify::on_connect( void ) noexcept {}
-void EvNatsClientNotify::on_shutdown( uint64_t,  const char *,
-                                      size_t ) noexcept {}
 /* after closed, release memory used by protocol */
 void
 EvNatsClient::release( void ) noexcept
 {
-  uint64_t bytes_lost = this->pending();
   if ( this->fwd_all_msgs ) {
     uint32_t h = this->poll.sub_route.prefix_seed( 0 );
     this->poll.sub_route.del_pattern_route( h, this->fd, 0 );
   }
   if ( this->fwd_all_subs )
     this->poll.remove_route_notify( *this );
-  this->EvConnection::release_buffers();
   this->release_fragments();
   if ( this->sid_ht != NULL ) {
     delete this->sid_ht;
     this->sid_ht = NULL;
   }
-  if ( this->sid_collision_ht != NULL ) {
-    delete this->sid_collision_ht;
-    this->sid_collision_ht = NULL;
-  }
   this->pat_tab.release();
   if ( this->notify != NULL )
-    this->notify->on_shutdown( bytes_lost, this->err, this->err_len );
+    this->notify->on_shutdown( *this, this->err, this->err_len );
+  this->EvConnection::release_buffers();
 }
 

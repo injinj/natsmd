@@ -3,6 +3,7 @@
 
 #include <natsmd/ev_nats.h>
 #include <raikv/dlinklist.h>
+#include <raikv/key_hash.h>
 
 namespace rai {
 namespace natsmd {
@@ -54,13 +55,6 @@ struct NatsFragment {
   }
 };
 
-/* notify when connected after NATS INFO message is processed */
-struct EvNatsClientNotify {
-  virtual void on_connect( void ) noexcept; /* notifcation of ready states */
-  virtual void on_shutdown( uint64_t bytes_lost,  const char *err,
-                            size_t errlen ) noexcept;
-};
-
 /* wildcards subscribed by prefix */
 struct NatsPrefix {
   uint32_t hash;        /* hash of wildcard prefix */
@@ -73,6 +67,53 @@ struct NatsPrefix {
   void copy( const void *s,  uint16_t l ) {
     ::memcpy( this->value, s, l );
   }
+};
+
+struct SidHash {
+  uint32_t hash[ 4 ];
+  SidHash() {}
+  SidHash( uint32_t h,  const char *sub,  size_t sublen ) {
+    uint64_t m = kv_hash_murmur64( sub, sublen, 0 );
+    this->hash[ 0 ] = h;
+    this->hash[ 1 ] = (uint32_t) m;
+    this->hash[ 2 ] = (uint32_t) ( m >> 32 );
+    this->hash[ 3 ] = kv_djb( sub, sublen );
+  }
+  bool operator==( const SidHash &h1 ) const {
+    for ( size_t i = 0; i < 4; i++ )
+      if ( this->hash[ i ] != h1.hash[ i ] )
+        return false;
+    return true;
+  }
+  SidHash &operator=( const SidHash &h1 ) {
+    for ( size_t i = 0; i < 4; i++ )
+      this->hash[ i ] = h1.hash[ i ];
+    return *this;
+  }
+  size_t operator&( size_t mod ) const {
+    size_t h = (uint64_t) this->hash[ 0 ] | ((uint64_t) this->hash[ 1 ] << 32 );
+    return h & mod;
+  }
+};
+
+typedef kv::IntHashTabT<SidHash,uint32_t> SidHashTab;
+
+struct EvNatsClientParameters {
+  const char * host,
+             * name,
+             * lang,
+             * version,
+             * user,
+             * pass,
+             * auth_token;
+  int          port,
+               opts;
+  EvNatsClientParameters( const char *h = NULL,  const char *n = NULL,
+                          const char *u = NULL,  const char *x = NULL,
+                          const char *t = NULL,  int p = 4222,
+                          int o = kv::DEFAULT_TCP_CONNECT_OPTS )
+    : host( h ), name( n ), lang( "C" ), version( NULL ), user( u ), pass( x ),
+      auth_token( t ), port( p ), opts( o ) {}
 };
 
 /* a connection to a NATS server */
@@ -97,7 +138,7 @@ struct EvNatsClient : public kv::EvConnection, public kv::RouteNotify {
   uint8_t      protocol,       /* from INFO */
                fwd_all_msgs,   /* send publishes */
                fwd_all_subs;   /* send subscriptons */
-  uint32_t     wild_prefix_char[ 3 ]; /* first char of wildcard [ '!' -> 127 ] */
+  uint32_t     wild_prefix_char[ 3 ]; /* first char of wildcard [ '!' -> 127 ]*/
   size_t       max_payload;    /* 1024 * 1024 */
   const char * name,           /* CONNECT parm:  name="service" */
              * lang,                          /* lang="C" */
@@ -105,18 +146,16 @@ struct EvNatsClient : public kv::EvConnection, public kv::RouteNotify {
              * user,                          /* user="network" */
              * pass,                          /* pass="xxx" */
              * auth_token;                    /* auth_token="xxx" */
-  kv::DLinkList<NatsFragment> frags_pending; /* large message fragments */
-  kv::UIntHashTab        * sid_ht;           /* hash32(subject) -> sid */
-  kv::ULongHashTab       * sid_collision_ht; /* hash64 -> sid hash32 collision*/
-  EvNatsClientNotify     * notify;           /* notify on_connect, on_shutdown */
-  kv::RouteVec<NatsPrefix> pat_tab;          /* wildcard patterns */
-  uint32_t wild_prefix_char_cnt[ 96 ];       /* count of all wildcard[ 0 ] */
+  kv::DLinkList<NatsFragment> frags_pending;  /* large message fragments */
+  SidHashTab                * sid_ht;         /* sub to sid */
+  kv::RouteVec<NatsPrefix>    pat_tab;        /* wildcard patterns */
+  uint32_t wild_prefix_char_cnt[ 96 ];        /* count of all wildcard[ 0 ] */
 
   EvNatsClient( kv::EvPoll &p ) noexcept;
   static EvNatsClient * create_nats_client( kv::EvPoll &p ) noexcept;
   /* connect to a NATS server */
-  bool connect( const char *host,  int port,
-                EvNatsClientNotify *n = NULL ) noexcept;
+  bool connect( EvNatsClientParameters &p,
+                kv::EvConnectionNotify *n = NULL ) noexcept;
   bool is_connected( void ) const {
     return this->EvSocket::fd != -1;
   }
@@ -183,7 +222,6 @@ struct EvNatsClient : public kv::EvConnection, public kv::RouteNotify {
   virtual void release( void ) noexcept final; /* after shutdown release mem */
   virtual bool on_msg( kv::EvPublish &pub ) noexcept; /* fwd to NATS network */
 
-  static const uint32_t SID_COLLISION = 1U << 31; /* 2 subjects have hash coll */
   /* track the sid of subjects for UNSUB */
   uint32_t create_sid( uint32_t h,  const char *sub,  size_t sublen ) noexcept;
   /* find the subject sid and remove it */
