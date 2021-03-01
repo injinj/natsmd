@@ -191,7 +191,7 @@ libnatsmd_dbjs  := $(addprefix $(objd)/, $(addsuffix .fpic.o, $(libnatsmd_files)
 libnatsmd_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(libnatsmd_files))) \
                   $(addprefix $(dependd)/, $(addsuffix .fpic.d, $(libnatsmd_files)))
 libnatsmd_dlnk  := $(dlnk_lib)
-libnatsmd_spec  := $(version)-$(build_num)
+libnatsmd_spec  := $(version)-$(build_num)_$(git_hash)
 libnatsmd_ver   := $(major_num).$(minor_num)
 
 $(libd)/libnatsmd.a: $(libnatsmd_objs)
