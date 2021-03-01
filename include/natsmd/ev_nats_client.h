@@ -72,6 +72,10 @@ struct NatsPrefix {
 struct SidHash {
   uint32_t hash[ 4 ];
   SidHash() {}
+  SidHash( const SidHash &h1 ) {
+    for ( size_t i = 0; i < 4; i++ )
+      this->hash[ i ] = h1.hash[ i ];
+  }
   SidHash( uint32_t h,  const char *sub,  size_t sublen ) {
     uint64_t m = kv_hash_murmur64( sub, sublen, 0 );
     this->hash[ 0 ] = h;
