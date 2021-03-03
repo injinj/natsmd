@@ -571,7 +571,8 @@ EvNatsClient::on_msg( EvPublish &pub ) noexcept
 /* hash subject to insert sid into sid_ht,
  * if collision, use hash64 in sid_collsion_ht */
 uint32_t
-EvNatsClient::create_sid( uint32_t h, const char *sub, size_t sublen ) noexcept
+EvNatsClient::create_sid( uint32_t h, const char *sub, size_t sublen,
+                          bool &is_new ) noexcept
 {
   SidHash  hash( h, sub, sublen );
   size_t   pos;
@@ -581,7 +582,11 @@ EvNatsClient::create_sid( uint32_t h, const char *sub, size_t sublen ) noexcept
     this->sid_ht = SidHashTab::resize( this->sid_ht );
   if ( ! this->sid_ht->find( hash, pos, sid ) ) {
     sid = this->next_sid++;
+    is_new = true;
     this->sid_ht->set( hash, pos, sid );
+  }
+  else {
+    is_new = false;
   }
   return sid;
 }
@@ -604,7 +609,8 @@ EvNatsClient::remove_sid( uint32_t h, const char *sub, size_t sublen ) noexcept
 void
 EvNatsClient::do_sub( uint32_t h,  const char *sub,  size_t sublen ) noexcept
 {
-  uint32_t sid        = this->create_sid( h, sub, sublen ),
+  bool     is_new;
+  uint32_t sid        = this->create_sid( h, sub, sublen, is_new ),
            sid_digits = uint32_digits( sid );
   size_t   len = 4 +             /* SUB */
                  sublen + 1 +    /* <subject> */
@@ -624,11 +630,9 @@ EvNatsClient::do_sub( uint32_t h,  const char *sub,  size_t sublen ) noexcept
 /* forward subscribe subject: SUB subject sid */
 void
 EvNatsClient::on_sub( uint32_t h,  const char *sub,  size_t sublen,
-                      uint32_t /*fd*/,  uint32_t rcnt,  char /*tp*/,
+                      uint32_t /*fd*/,  uint32_t /*rcnt*/,  char /*tp*/,
                       const char * /*rep*/,  size_t /*rlen*/) noexcept
 {
-  if ( rcnt != 1 ) /* if first route established */
-    return;
   this->do_sub( h, sub, sublen );
   this->idle_push( EV_WRITE );
 }
@@ -662,16 +666,31 @@ EvNatsClient::do_psub( uint32_t h,  const char *prefix,
                        uint8_t prefix_len ) noexcept
 {
   uint8_t w = ( prefix_len == 0 ? 0 : prefix[ 0 ] );
-  this->set_wildcard_match( w ); /* track first char of wildcards */
-  NatsPrefix * pat        = this->pat_tab.insert( h, prefix, prefix_len );
-  uint32_t     sid        = this->create_sid( h, prefix, prefix_len ),
+  bool         is_new;
+  uint32_t     sid        = this->create_sid( h, prefix, prefix_len, is_new ),
                sid_digits = uint32_digits( sid );
   size_t       len        = 4 +                 /* SUB */
                             prefix_len + 2 +    /* <subject> + > */
                             1 + sid_digits + 2; /* -<sid>\r\n */
+  NatsPrefix * pat;
+  if ( is_new ) {
+    this->set_wildcard_match( w ); /* track first char of wildcards */
+    pat = this->pat_tab.insert( h, prefix, prefix_len );
+    pat->sid = sid;
+  }
+  else {
+    pat = this->pat_tab.find( h, prefix, prefix_len );
+    if ( pat == NULL ) { /* should be there */
+      fprintf( stderr, "pattern not found: %.*s\n", (int) prefix_len, prefix );
+      return;
+    }
+    if ( pat->sid != sid ) {
+      fprintf( stderr, "bad sid for prefix: %.*s\n", (int) prefix_len, prefix );
+      pat->sid = sid;
+    }
+  }
   char *p = this->alloc( len ),
        *s = p;
-  pat->sid = sid;
   p = concat_hdr( p, "SUB ", 4 );
   if ( prefix_len > 0 )
     p = concat_hdr( p, prefix, prefix_len );
@@ -687,23 +706,20 @@ EvNatsClient::do_psub( uint32_t h,  const char *prefix,
 void
 EvNatsClient::on_psub( uint32_t h,  const char * /*pat*/,
                        size_t /*patlen*/,  const char *prefix,
-                       uint8_t prefix_len,  uint32_t /*fd*/,  uint32_t rcnt,
-                       char /*tp*/) noexcept
+                       uint8_t prefix_len,  uint32_t /*fd*/,
+                       uint32_t /*rcnt*/,  char /*tp*/) noexcept
 {
-  bool fwd = false;
-  if ( rcnt == 1 ) {
-    /* prefix must end with a '.' */
-    if ( prefix_len > 0 && prefix[ prefix_len - 1 ] == '.' )
-      fwd = true;
-    else if ( prefix_len > 0 ) {
-      fprintf( stderr, "unable psub, no segment \"%.*s\"\n", 
-               (int) prefix_len, prefix );
-    }
+  bool fwd;
+  /* prefix must end with a '.' */
+  if ( prefix_len > 0 && prefix[ prefix_len - 1 ] == '.' )
+    fwd = true;
+  else if ( prefix_len > 0 ) {
+    fprintf( stderr, "unable psub, no segment \"%.*s\"\n", 
+             (int) prefix_len, prefix );
+    fwd = false;
   }
-  else if ( rcnt == 2 ) {
-    if ( prefix_len == 0 ) /* EvNatsClient is subscribed to > */
-      fwd = true;
-  }
+  else
+    fwd = true;
   if ( ! fwd )
     return;
   this->do_psub( h, prefix, prefix_len );
@@ -714,17 +730,19 @@ void
 EvNatsClient::on_punsub( uint32_t h,  const char * /*pat*/,
                          size_t /*patlen*/,  const char *prefix,
                          uint8_t prefix_len,  uint32_t /*fd*/,
-                         uint32_t rcnt,  char /*tp*/) noexcept
+                         uint32_t /*rcnt*/,  char /*tp*/) noexcept
 {
-  bool fwd = false;
-  if ( rcnt == 0 ) {
-    if ( prefix_len > 0 && prefix[ prefix_len - 1 ] == '.' )
-      fwd = true;
+  bool fwd;
+  /* prefix must end with a '.' */
+  if ( prefix_len > 0 && prefix[ prefix_len - 1 ] == '.' )
+    fwd = true;
+  else if ( prefix_len > 0 ) {
+    fprintf( stderr, "unable punsub, no segment \"%.*s\"\n", 
+             (int) prefix_len, prefix );
+    fwd = false;
   }
-  else if ( rcnt == 1 ) {
-    if ( prefix_len == 0 ) /* EvNatsClient is subscribed to > */
-      fwd = true;
-  }
+  else
+    fwd = true;
   if ( ! fwd )
     return;
   uint32_t sid        = this->remove_sid( h, prefix, prefix_len ),

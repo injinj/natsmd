@@ -227,7 +227,8 @@ struct EvNatsClient : public kv::EvConnection, public kv::RouteNotify {
   virtual bool on_msg( kv::EvPublish &pub ) noexcept; /* fwd to NATS network */
 
   /* track the sid of subjects for UNSUB */
-  uint32_t create_sid( uint32_t h,  const char *sub,  size_t sublen ) noexcept;
+  uint32_t create_sid( uint32_t h,  const char *sub,  size_t sublen,
+                       bool &is_new ) noexcept;
   /* find the subject sid and remove it */
   uint32_t remove_sid( uint32_t h,  const char *sub,  size_t sublen ) noexcept;
   /* RouteNotify */
