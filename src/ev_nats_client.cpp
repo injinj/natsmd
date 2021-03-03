@@ -730,8 +730,10 @@ void
 EvNatsClient::on_punsub( uint32_t h,  const char * /*pat*/,
                          size_t /*patlen*/,  const char *prefix,
                          uint8_t prefix_len,  uint32_t /*fd*/,
-                         uint32_t /*rcnt*/,  char /*tp*/) noexcept
+                         uint32_t rcnt,  char /*tp*/) noexcept
 {
+  if ( rcnt != 0 ) /* if no routes left */
+    return;
   bool fwd;
   /* prefix must end with a '.' */
   if ( prefix_len > 0 && prefix[ prefix_len - 1 ] == '.' )
