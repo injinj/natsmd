@@ -130,7 +130,7 @@ dlnk_lib    += -lpcre2-8
 malloc_lib  :=
 
 .PHONY: everything
-everything: $(kv_lib) $(dec_lib) $(md_lib) $(natsmd_lib) all
+everything: $(kv_lib) $(dec_lib) $(md_lib) $(natsmd_lib) $(hdr_lib) all
 
 clean_subs :=
 dlnk_dll_depend :=
