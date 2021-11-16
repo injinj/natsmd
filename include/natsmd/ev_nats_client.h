@@ -61,12 +61,6 @@ struct NatsPrefix {
   uint32_t sid;         /* sid forwarded to NATS is -sid */
   uint16_t len;         /* length of prefix */
   char     value[ 2 ];  /* the prefix */
-  bool equals( const void *s,  uint16_t l ) const {
-    return l == this->len && ::memcmp( s, this->value, l ) == 0;
-  }
-  void copy( const void *s,  uint16_t l ) {
-    ::memcpy( this->value, s, l );
-  }
 };
 
 struct SidHash {
@@ -123,6 +117,7 @@ struct EvNatsClientParameters {
 /* a connection to a NATS server */
 struct EvNatsClient : public kv::EvConnection, public kv::RouteNotify {
   void * operator new( size_t, void *ptr ) { return ptr; }
+  kv::RoutePublish & sub_route;
   char       * msg_ptr;        /* ptr to the msg blob */
   size_t       msg_len;        /* size of the current message blob */
   NatsState    msg_state;      /* ascii hdr mode or binary blob mode */
@@ -175,6 +170,8 @@ struct EvNatsClient : public kv::EvConnection, public kv::RouteNotify {
     this->err            = NULL;
     this->err_len        = 0;
     this->next_sid       = 1;
+    if ( this->sid_ht == NULL )
+      this->sid_ht = SidHashTab::resize( NULL );
     for ( int i = 0; i < 3; i++ )
       this->wild_prefix_char[ i ] = 0;
     for ( int j = 0; j < 96; j++ )

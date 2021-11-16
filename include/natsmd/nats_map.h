@@ -135,11 +135,11 @@ struct NatsMapRec {
   uint16_t len;        /* size of list */
   char     value[ 2 ]; /* first element is the key, the rest are a list */
 
-  bool equals( const void *s,  uint16_t ) const {
-    return ((const NatsPair *) s)->equals( this->value );
+  static bool equals( const NatsMapRec &r, const void *s, uint16_t ) {
+    return ((const NatsPair *) s)->equals( r.value );
   }
-  void copy( const void *s,  uint16_t ) {
-    return ((const NatsPair *) s)->copy( this->value );
+  static void copy( NatsMapRec &r, const void *s, uint16_t ) {
+    return ((const NatsPair *) s)->copy( r.value );
   }
 };
 
@@ -151,13 +151,6 @@ struct NatsWildRec {
   pcre2_real_match_data_8 * md;
   uint16_t                  len;
   char                      value[ 2 ];
-
-  bool equals( const void *s,  uint16_t l ) const {
-    return l == this->len && ::memcmp( s, this->value, l ) == 0;
-  }
-  void copy( const void *s,  uint16_t l ) {
-    ::memcpy( this->value, s, l );
-  }
 };
 
 enum NatsSubStatus {
@@ -170,7 +163,7 @@ enum NatsSubStatus {
 };
 
 /* the subscription table map hashing methods */
-typedef kv::RouteVec<NatsMapRec>  NatsMap;
+typedef kv::RouteVec<NatsMapRec, NatsMapRec::copy, NatsMapRec::equals>  NatsMap;
 typedef kv::RouteVec<NatsWildRec> NatsWild;
 
 /* iterate over sid -> subjects or subject -> sids */

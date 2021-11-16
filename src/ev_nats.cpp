@@ -355,10 +355,9 @@ EvNatsService::add_sub( void ) noexcept
       this->add_wild( xsubj );
     }
     else {
-      uint32_t rcnt = this->poll.sub_route.add_sub_route( xsubj.hash(),
-                                                          this->fd );
-      this->poll.notify_sub( xsubj.hash(), xsubj.str, xsubj.len,
-                             this->fd, rcnt, 'N' );
+      uint32_t rcnt = this->sub_route.add_sub_route( xsubj.hash(), this->fd );
+      this->sub_route.notify_sub( xsubj.hash(), xsubj.str, xsubj.len,
+                                  this->fd, rcnt, 'N' );
     }
   }
 #if 0
@@ -378,7 +377,7 @@ EvNatsService::add_wild( NatsStr &xsubj ) noexcept
 
   if ( cvt.convert_rv( xsubj.str, xsubj.len ) == 0 ) {
     h = kv_crc_c( xsubj.str, cvt.prefixlen,
-                  this->poll.sub_route.prefix_seed( cvt.prefixlen ) );
+                  this->sub_route.prefix_seed( cvt.prefixlen ) );
     rt = this->map.add_wild( h, xsubj );
     if ( rt == NULL || rt->re != NULL )
       return;
@@ -399,9 +398,9 @@ EvNatsService::add_wild( NatsStr &xsubj ) noexcept
       this->map.rem_wild( h, xsubj );
       return;
     }
-    rcnt = this->poll.sub_route.add_pattern_route( h, this->fd, cvt.prefixlen );
-    this->poll.notify_psub( h, cvt.out, cvt.off, xsubj.str, cvt.prefixlen,
-                            this->fd, rcnt, 'N' );
+    rcnt = this->sub_route.add_pattern_route( h, this->fd, cvt.prefixlen );
+    this->sub_route.notify_psub( h, cvt.out, cvt.off, xsubj.str, cvt.prefixlen,
+                                 this->fd, rcnt, 'N' );
   }
 }
 
@@ -431,11 +430,10 @@ EvNatsService::rem_wild( NatsStr &xsubj ) noexcept
 
   if ( cvt.convert_rv( xsubj.str, xsubj.len ) == 0 ) {
     h = kv_crc_c( xsubj.str, cvt.prefixlen,
-                  this->poll.sub_route.prefix_seed( cvt.prefixlen ) );
-    rcnt = this->poll.sub_route.del_pattern_route( h, this->fd,
-                                                   cvt.prefixlen );
-    this->poll.notify_punsub( h, cvt.out, cvt.off, xsubj.str, cvt.prefixlen,
-                              this->fd, rcnt, 'N' );
+                  this->sub_route.prefix_seed( cvt.prefixlen ) );
+    rcnt = this->sub_route.del_pattern_route( h, this->fd, cvt.prefixlen );
+    this->sub_route.notify_punsub( h, cvt.out, cvt.off, xsubj.str,
+                                   cvt.prefixlen, this->fd, rcnt, 'N' );
     this->map.rem_wild( h, xsubj );
   }
 }
@@ -460,9 +458,9 @@ EvNatsService::rem_sid( uint32_t max_msgs ) noexcept
         else {
           uint32_t rcnt = 0;
           if ( this->map.sub_map.find_by_hash( h ) == NULL )
-            rcnt = this->poll.sub_route.del_sub_route( h, this->fd );
-          this->poll.notify_unsub( h, xsubj.str, xsubj.len,
-                                   this->fd, rcnt, 'N' );
+            rcnt = this->sub_route.del_sub_route( h, this->fd );
+          this->sub_route.notify_unsub( h, xsubj.str, xsubj.len,
+                                        this->fd, rcnt, 'N' );
         }
       }
       if ( status != NATS_OK ) {
@@ -507,9 +505,9 @@ EvNatsService::rem_all_sub( void ) noexcept
     if ( xsubj.is_wild() )
       this->rem_wild( xsubj );
     else {
-      uint32_t rcnt = this->poll.sub_route.del_sub_route( rt->hash, this->fd );
-      this->poll.notify_unsub( rt->hash, xsubj.str, xsubj.len,
-                               this->fd, rcnt, 'N' );
+      uint32_t rcnt = this->sub_route.del_sub_route( rt->hash, this->fd );
+      this->sub_route.notify_unsub( rt->hash, xsubj.str, xsubj.len,
+                                    this->fd, rcnt, 'N' );
     }
   }
 }
@@ -524,7 +522,7 @@ EvNatsService::fwd_pub( void ) noexcept
                  this->fd, xsub.hash(),
                  this->msg_len_ptr, this->msg_len_digits,
                  MD_STRING, 'p' );
-  return this->poll.forward_msg( pub );
+  return this->sub_route.forward_msg( pub );
 }
 
 bool
@@ -555,8 +553,8 @@ EvNatsService::on_msg( EvPublish &pub ) noexcept
           uint32_t rcnt = 0;
           /* check for duplicate hashes */
           if ( this->map.sub_map.find_by_hash( h ) == NULL )
-            rcnt = this->poll.sub_route.del_sub_route( h, this->fd );
-          this->poll.notify_unsub( h, xsubj.str, xsubj.len,
+            rcnt = this->sub_route.del_sub_route( h, this->fd );
+          this->sub_route.notify_unsub( h, xsubj.str, xsubj.len,
                                    this->fd, rcnt, 'N' );
         }
       }

@@ -5,7 +5,7 @@
 #include <natsmd/ev_nats_client.h>
 #include <raikv/ev_publish.h>
 #include <raikv/kv_pubsub.h>
-#include <raikv/bit_iter.h>
+#include <raikv/bit_set.h>
 #include <raimd/json_msg.h>
 
 using namespace rai;
@@ -29,6 +29,7 @@ getenv_bool( const char *var )
 
 EvNatsClient::EvNatsClient( EvPoll &p ) noexcept
     : EvConnection( p, p.register_type( "natsclient" ) ),
+      sub_route( p.sub_route ),
       next_sid( 1 ), protocol( 1 ), fwd_all_msgs( 1 ), fwd_all_subs( 1 ),
       max_payload( 1024 * 1024 ), name( 0 ),
       lang( 0 ), version( 0 ), user( 0 ), pass( 0 ), auth_token( 0 ),
@@ -329,7 +330,7 @@ EvNatsClient::fwd_pub( void ) noexcept
     pmatch = 1; /* only the subject matches */
   /* if only one possible match, no need to deduplicate */
   if ( pmatch <= 1 )
-    flow = this->poll.forward_msg( pub );
+    flow = this->sub_route.forward_msg( pub );
   else /* multiple wildcards or a subject and a wildcard may match */
     flow = this->deduplicate_wildcard( pub );
   if ( frag != NULL )
@@ -344,7 +345,7 @@ EvNatsClient::deduplicate_wildcard( EvPublish &pub ) noexcept
 {
   KvPrefHash pf[ 64 ];
   size_t     pfcnt = 0;
-  BitIter64  bi( this->poll.sub_route.pat_mask );
+  BitIter64  bi( this->sub_route.pat_mask );
   uint32_t   hash,
              max_sid = 0;
 
@@ -354,7 +355,7 @@ EvNatsClient::deduplicate_wildcard( EvPublish &pub ) noexcept
     do {
       if ( bi.i > this->subject_len )
         break;
-      hash = this->poll.sub_route.prefix_seed( bi.i );
+      hash = this->sub_route.prefix_seed( bi.i );
       if ( bi.i > 0 )
         hash = kv_crc_c( this->subject, bi.i, hash );
       NatsPrefix *pref = this->pat_tab.find( hash, this->subject, bi.i );
@@ -373,7 +374,7 @@ EvNatsClient::deduplicate_wildcard( EvPublish &pub ) noexcept
   /* if no wildcard matches or the maximum sid matches, forward */
   if ( max_sid == 0 || (uint64_t) max_sid ==
                        string_to_uint64( &this->sid[ 1 ], this->sid_len - 1 ) )
-    return this->poll.forward_msg( pub, NULL, pfcnt, pf );
+    return this->sub_route.forward_msg( pub, NULL, pfcnt, pf );
   /* toss the publish, only forward the maximum sid */
   return true;
 }
@@ -578,12 +579,12 @@ EvNatsClient::create_sid( uint32_t h, const char *sub, size_t sublen,
   size_t   pos;
   uint32_t sid;
 
-  if ( this->sid_ht == NULL || this->sid_ht->need_resize() )
-    this->sid_ht = SidHashTab::resize( this->sid_ht );
   if ( ! this->sid_ht->find( hash, pos, sid ) ) {
     sid = this->next_sid++;
     is_new = true;
     this->sid_ht->set( hash, pos, sid );
+    if ( this->sid_ht->need_resize() )
+      this->sid_ht = SidHashTab::resize( this->sid_ht );
   }
   else {
     is_new = false;
@@ -603,6 +604,8 @@ EvNatsClient::remove_sid( uint32_t h, const char *sub, size_t sublen ) noexcept
     return 0; /* not a valid sid */
   }
   this->sid_ht->remove( pos );
+  if ( this->sid_ht->need_resize() )
+    this->sid_ht = SidHashTab::resize( this->sid_ht );
   return sid;
 }
 /* forward subscribe subject: SUB subject sid */
@@ -881,11 +884,11 @@ EvNatsClient::parse_info( const char *buf,  size_t bufsz ) noexcept
   this->append( outbuf, len );
   /* if all subs are forwarded to NATS */
   if ( this->fwd_all_subs )
-    this->poll.add_route_notify( *this );
+    this->sub_route.add_route_notify( *this );
   /* if all msgs are forwarded to NATS */
   if ( this->fwd_all_msgs ) {
-    uint32_t h = this->poll.sub_route.prefix_seed( 0 );
-    this->poll.sub_route.add_pattern_route( h, this->fd, 0 );
+    uint32_t h = this->sub_route.prefix_seed( 0 );
+    this->sub_route.add_pattern_route( h, this->fd, 0 );
   }
   /* done, notify connected, may be -ERR later if conn fails to authenticate */
   if ( this->notify != NULL )
@@ -896,11 +899,11 @@ void
 EvNatsClient::release( void ) noexcept
 {
   if ( this->fwd_all_msgs ) {
-    uint32_t h = this->poll.sub_route.prefix_seed( 0 );
-    this->poll.sub_route.del_pattern_route( h, this->fd, 0 );
+    uint32_t h = this->sub_route.prefix_seed( 0 );
+    this->sub_route.del_pattern_route( h, this->fd, 0 );
   }
   if ( this->fwd_all_subs )
-    this->poll.remove_route_notify( *this );
+    this->sub_route.remove_route_notify( *this );
   this->release_fragments();
   if ( this->sid_ht != NULL ) {
     delete this->sid_ht;

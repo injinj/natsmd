@@ -25,6 +25,7 @@ enum NatsState {
 
 struct EvNatsService : public kv::EvConnection {
   void * operator new( size_t, void *ptr ) { return ptr; }
+  kv::RoutePublish & sub_route;
   NatsSubMap map;
 
   char     * msg_ptr;     /* ptr to the msg blob */
@@ -54,7 +55,8 @@ struct EvNatsService : public kv::EvConnection {
            * pass,
            * auth_token;
 
-  EvNatsService( kv::EvPoll &p,  const uint8_t t ) : kv::EvConnection( p, t ) {}
+  EvNatsService( kv::EvPoll &p,  const uint8_t t )
+    : kv::EvConnection( p, t ), sub_route( p.sub_route ) {}
   void initialize_state( void ) {
     this->msg_ptr   = NULL;
     this->msg_len   = 0;
