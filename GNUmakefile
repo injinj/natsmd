@@ -122,7 +122,6 @@ hdr_lib     := -lhdrhist
 hdr_includes = -I/usr/include/hdrhist
 endif
 
-
 natsmd_lib  := $(libd)/libnatsmd.a
 rpath       := -Wl,-rpath,$(pwd)/$(libd)$(rpath1)$(rpath2)$(rpath3)$(rpath4)$(rpath5)$(rpath6)$(rpath7)
 lnk_lib     += -lpcre2-8
@@ -225,8 +224,16 @@ ping_nats_lnk   := $(lnk_lib) $(hdr_lib)
 
 $(bind)/ping_nats: $(ping_nats_objs) $(ping_nats_libs) $(lnk_dep)
 
-all_exes    += $(bind)/ping_nats
-all_depends += $(ping_nats_deps)
+test_map_files := test_map
+test_map_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(test_map_files)))
+test_map_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(test_map_files)))
+test_map_libs  := $(natsmd_lib)
+test_map_lnk   := $(natsmd_lib) $(lnk_lib)
+
+$(bind)/test_map: $(test_map_objs) $(test_map_libs) $(lnk_dep)
+
+all_exes    += $(bind)/test_map
+all_depends += $(test_map_deps)
 
 all_dirs := $(bind) $(libd) $(objd) $(dependd)
 

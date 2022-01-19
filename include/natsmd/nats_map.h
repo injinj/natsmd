@@ -7,31 +7,23 @@ extern "C" {
 }
 
 #include <raikv/route_ht.h>
+#include <raikv/dlinklist.h>
+#include <raikv/pattern_cvt.h>
 
 namespace rai {
 namespace natsmd {
 
-/*
- * Sid can have only one subject in NATS, but can have multiple subs here
- * a subject may have multipe sids
- *
- *   sub_tab [ subject, max_msgs, msg_cnt ] => sid1, [ sid2, ... ]
- *
- *   sid_tab [ sid1, max_msgs ] => subject1, [ subject2, ... ]
- *
- * The sid_tab contains both max_msgs and msg_cnt, but only max_msgs is used,
- * to initialize the sub_tab subject max_msgs.  The max_msgs refers to msgs on
- * a single subject, not the sum of all subjects msgs attached to a sid.
- *
- * The sub_tab sid tracks both msg counts and triggers the unsubscribe when
- * msg_cnt expires at msg_cnt >= max_msgs.
- */
-struct SidMsgCount {
-  uint32_t max_msgs, /* if unsubscribe sid max_msgs */
-           msg_cnt;  /* current msg count through sid */
-
-  SidMsgCount( uint32_t maxm ) : max_msgs( maxm ), msg_cnt( 0 ) {}
+enum NatsSubStatus {
+  NATS_OK          = 0,
+  NATS_IS_NEW      = 1, /* new subject or pattern subscribed */
+  NATS_EXPIRED     = 2, /* subject or pattern dropped or publish == maxmsgs */
+  NATS_NOT_FOUND   = 3, /* sid not found or publish subject not found */
+  NATS_EXISTS      = 4, /* sid already mapped to a subject */
+  NATS_TOO_MANY    = 5, /* sid list size > 64K */
+  NATS_BAD_PATTERN = 6  /* failed to create pattern subscription */
 };
+
+const char * nats_status_str( NatsSubStatus status );
 
 /* a subject or sid string */
 struct NatsStr {
@@ -42,47 +34,27 @@ struct NatsStr {
   NatsStr( const char *s = NULL,  uint16_t l = 0,  uint32_t ha = 0 )
     : str( s ), len( l ), h( ha ) {}
 
+  void set( const char *s = NULL,  uint16_t l = 0,  uint32_t ha = 0 ) {
+    this->str = s; this->len = l; this->h = ha;
+  }
+  bool ref( const char *p,  const char *end ) {
+    if ( &p[ 2 ] > end )
+      return false;
+    ::memcpy( &this->len, p, 2 );
+    if ( &p[ 2 + this->len ] > end )
+      return false;
+    this->str = &p[ 2 ];
+    this->h   = 0;
+    return true;
+  }
   uint32_t hash( void ) {
     if ( this->h == 0 )
       this->h = kv_crc_c( this->str, this->len, 0 );
     return this->h;
   }
-
-  size_t copy( char *out ) const {
-#if __GNUC__ >= 7
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wstringop-overflow"
-#endif
-    ::memcpy( out, &this->len, sizeof( uint16_t ) );
-    ::memcpy( &out[ sizeof( uint16_t ) ], this->str, this->len );
-#if __GNUC__ >= 7
-#pragma GCC diagnostic pop
-#endif
-    return this->len + sizeof( uint16_t );
-  }
-
-  size_t read( const char *val ) {
-    ::memcpy( &this->len, val, sizeof( uint16_t ) );
-    this->str = &val[ sizeof( uint16_t ) ];
-    this->h   = 0;
-    return this->len + sizeof( uint16_t );
-  }
-
-  bool equals( const char *val ) const {
-    uint16_t vallen;
-    ::memcpy( &vallen, val, sizeof( uint16_t ) );
-    return vallen == this->len &&
-           ::memcmp( &val[ sizeof( uint16_t ) ], this->str, this->len ) == 0;
-  }
-
   bool equals( const NatsStr &val ) const {
     return val.len == this->len && ::memcmp( val.str, this->str, val.len ) == 0;
   }
-
-  size_t length( void ) const {
-    return sizeof( uint16_t ) + this->len;
-  }
-
   bool is_wild( void ) const {
     if ( this->len == 0 )
       return false;
@@ -94,8 +66,13 @@ struct NatsStr {
       if ( this->str[ this->len - 2 ] == '.' ) /* is last char */
         return true;
     }
-    /* look for .*. */
-    return ::memmem( this->str, this->len, ".*.", 3 ) != NULL;
+    /* look for *. */
+    const char *p = (const char *) ::memmem( this->str, this->len, "*.", 2 );
+    if ( p != NULL ) {
+      if ( p == this->str || p[ -1 ] == '.' )
+        return true;
+    }
+    return false;
   }
   bool is_valid( void ) {
     if ( this->len == 0 )
@@ -108,386 +85,526 @@ struct NatsStr {
   }
 };
 
-/* a struct used to insert or find a sid/subj */
-struct NatsPair {
-  NatsStr & one, /* the key */
-          * two; /* the value inserted, null on find */
+struct SidEntry {
+  uint64_t  max_msgs,   /* if a max number of messages */
+            msg_cnt;    /* count of msgs at start of subscribe */
+  uint32_t  subj_hash,  /* hash of subject or pattern */
+            pref_hash,  /* hash of pattern prefix */
+            hash;       /* hash of the sid string */
+  uint16_t  len;        /* len of sid */
+  char      value[ 2 ]; /* the sid value */
 
-  NatsPair( NatsStr &o,  NatsStr *t = NULL ) : one( o ), two( t ) {}
-
-  size_t length( void ) const {
-    return this->one.length() + ( this->two ? this->two->length() : 0 );
+  void init( uint32_t h,  uint32_t pre_h = 0 ) {
+    this->max_msgs  = 0;
+    this->msg_cnt   = 0;
+    this->subj_hash = h;
+    this->pref_hash = pre_h;
   }
-  bool equals( const char *s ) const {
-    return this->one.equals( s );
-  }
-  void copy( char *s ) const { /* init a list, key and data */
-    size_t off = this->one.copy( s );
-    if ( this->two ) this->two->copy( &s[ off ] );
-  }
+  void print( void ) noexcept;
 };
 
-/* a record of a subject or sid */
-struct NatsMapRec {
-  uint32_t hash,       /* hash value of the sub/sid */
-           msg_cnt,    /* the current count of msgs published */
-           max_msgs;   /* the maximum msg count, set with unsub sid <max> */
-  uint16_t len;        /* size of list */
-  char     value[ 2 ]; /* first element is the key, the rest are a list */
+struct NatsSubData {
+  uint64_t msg_cnt,    /* number of messages matched */
+           max_msgs;   /* if a max is set on one of the sids */
+  uint32_t hash;       /* hash of subject */
+  uint16_t refcnt,     /* count of sid references */
+           subj_len,   /* len of subject */
+           sid_off,    /* len of sids */
+           len;        /* length of subject + sids */
+  char     value[ 2 ]; /* the subject string + sids */
 
-  static bool equals( const NatsMapRec &r, const void *s, uint16_t ) {
-    return ((const NatsPair *) s)->equals( r.value );
+  void init( uint16_t len ) {
+    this->msg_cnt  = 0;
+    this->max_msgs = 0;
+    this->refcnt   = 0;
+    this->subj_len = len;
+    this->sid_off  = len;
   }
-  static void copy( NatsMapRec &r, const void *s, uint16_t ) {
-    return ((const NatsPair *) s)->copy( r.value );
-  }
-};
-
-/* hash of prefix with wild value */
-struct NatsWildRec {
-  uint32_t                  hash,
-                            subj_hash;
-  pcre2_real_code_8       * re;
-  pcre2_real_match_data_8 * md;
-  uint16_t                  len;
-  char                      value[ 2 ];
-};
-
-enum NatsSubStatus {
-  NATS_OK        = 0,
-  NATS_IS_NEW    = 1,
-  NATS_EXPIRED   = 2,
-  NATS_NOT_FOUND = 3,
-  NATS_EXISTS    = 4,
-  NATS_TOO_MANY  = 5
-};
-
-/* the subscription table map hashing methods */
-typedef kv::RouteVec<NatsMapRec, NatsMapRec::copy, NatsMapRec::equals>  NatsMap;
-typedef kv::RouteVec<NatsWildRec> NatsWild;
-
-/* iterate over sid -> subjects or subject -> sids */
-struct NatsIter {
-  char   * buf;
-  uint16_t buflen,
-           off,
-           curlen,
-           rmlen;
-
-  NatsIter() : buf( 0 ), buflen( 0 ), off( 0 ), curlen( 0 ), rmlen( 0 ) {}
-
-  void init( NatsMapRec &rt ) {
-    uint16_t val;
-    ::memcpy( &val, rt.value, 2 );
-    this->init( rt.value, val + 2, rt.len );
-  }
-  void init( char *s,  uint16_t o,  uint16_t l ) {
-    this->buf    = s;
-    this->buflen = l;
-    this->off    = o;
-  }
-  bool get( NatsStr &str ) {
-    if ( this->off >= this->buflen )
+  bool add_sid( const NatsStr &sid ) {
+    if ( this->sid_off + sid.len + 2 > this->len )
       return false;
-    this->curlen = str.read( &this->buf[ this->off ] );
+    char *p = &this->value[ this->sid_off ];
+    this->sid_off += sid.len + 2;
+    ::memcpy( p, &sid.len, 2 );
+    ::memcpy( &p[ 2 ], sid.str, sid.len );
+    this->refcnt++;
     return true;
   }
-  void incr( void ) {
-    this->off += this->curlen;
+  char *end( void ) { return &this->value[ this->sid_off ]; }
+  bool first_sid( NatsStr &sid ) {
+    return sid.ref( &this->value[ this->subj_len ], this->end() );
   }
-  void remove( void ) {
-    this->buflen -= this->curlen;
-    this->rmlen  += this->curlen;
-    ::memmove( &this->buf[ this->off ],
-               &this->buf[ this->off + this->curlen ],
-               this->buflen - this->off );
+  bool next_sid( NatsStr &sid ) {
+    return sid.ref( &sid.str[ sid.len ], this->end() );
   }
-  bool is_member( const NatsStr &val ) {
-    NatsStr mem;
-    for ( ; this->get( mem ); this->incr() ) {
-      if ( mem.equals( val ) )
-        return true;
-    }
-    return false;
+  void remove_sid( NatsStr &sid ) {
+    size_t mvlen = this->end() - &sid.str[ sid.len ], /* len after sid  */
+           off   = &sid.str[ -2 ] - this->value;      /* offset to start sid */
+    ::memmove( &this->value[ off ], &sid.str[ sid.len ], mvlen );
+    this->sid_off -= sid.len + 2;
+    this->refcnt--;
   }
-};
-
-/* used for expire contexts after publish or unsub */
-struct NatsLookup {
-  NatsIter     iter; /* list of subs / sids that are published or unsubed */
-  kv::RouteLoc loc;  /* location of the sid / subject */
-  NatsMapRec * rt;   /* the subject / sid record, containing the list */
-
-  NatsLookup() : rt( 0 ) {
-    this->loc.init();
+  bool remove_and_next_sid( NatsStr &sid ) {
+    this->remove_sid( sid );
+    return sid.ref( &sid.str[ -2 ], this->end() );
   }
-};
-
-/* table of subjects and sids for routing messages */
-struct NatsSubMap {
-  NatsMap  sub_map,
-           sid_map;
-  NatsWild wild_map;
-
-  void release( void ) {
-    this->sub_map.release();
-    this->sid_map.release();
-    this->wild_map.release();
+  bool equals( const void *s,  uint16_t l ) const {
+    return this->subj_len == l && ::memcmp( s, this->value, l ) == 0;
   }
-  NatsWildRec *add_wild( uint32_t h,  NatsStr &subj ) {
-    kv::RouteLoc  loc;
-    NatsWildRec * rt;
-    rt = this->wild_map.upsert( h, subj.str, subj.len, loc );
-    if ( rt != NULL && loc.is_new ) {
-       rt->subj_hash = subj.hash();
-       rt->re = NULL;
-       rt->md = NULL;
-    }
-    return rt;
+  bool equals( const NatsStr &str ) const {
+    return this->equals( str.str, str.len );
   }
-  void rem_wild( uint32_t h,  NatsStr &subj ) noexcept;
-
-  /* put in any elem, search for it and append if not found
-   * sub_tab[ sub ] => sid, sid2...
-   * sid_tab[ sid ] => subj */
-  NatsSubStatus put( NatsStr &subj,  NatsStr &sid ) {
-    NatsSubStatus status = this->put( this->sub_map, subj, sid );
-    switch ( status ) {
-      case NATS_IS_NEW:
-      case NATS_OK:
-        this->put( this->sid_map, sid, subj );
-        break;
-      default:
-        break;
-    }
-    return status;
-  }
-  /* add sub or sid if it doesn't exist */
-  NatsSubStatus put( NatsMap &map,  NatsStr &one,  NatsStr &two ) {
-    NatsIter     iter;
-    NatsStr      mem;
-    NatsMapRec * rt;
-    kv::RouteLoc loc;
-    size_t       off, new_len;
-    NatsPair     val( one, &two );
-
-    rt = map.upsert( one.hash(), &val, val.length(), loc );
-    if ( loc.is_new ) {
-      rt->msg_cnt  = 0;
-      rt->max_msgs = 0;
-      return NATS_IS_NEW;
-    }
-    /* check if already added */
-    iter.init( *rt );
-    if ( iter.is_member( two ) )
-      return NATS_EXISTS;
-    off = rt->len;
-    new_len = off + (size_t) two.length();
-    if ( new_len > 0xffffU )
-      return NATS_TOO_MANY;
-    rt = map.resize( one.hash(), &val, off, new_len, loc );
-    two.copy( &rt->value[ off ] );
-    return NATS_OK;
-  }
-  /* for a publish, increment msg count and check max-ed expired sids */
-  NatsSubStatus lookup_publish( NatsStr &subj,  NatsLookup &pub ) {
-    NatsPair val( subj );
-    if ( (pub.rt = this->sub_map.find( subj.hash(), &val, 0,
-                                       pub.loc )) != NULL ) {
-      pub.rt->msg_cnt++;
-      pub.iter.init( *pub.rt );
-      if ( pub.rt->max_msgs == 0 || pub.rt->max_msgs > pub.rt->msg_cnt )
-        return NATS_OK;
-      return NATS_EXPIRED;
-    }
-    return NATS_NOT_FOUND;
-  }
-  NatsSubStatus lookup_wild( NatsStr &,  NatsLookup & ) {
-    return NATS_NOT_FOUND;
-  }
-  /* after publish, remove sids that are dead */
-  NatsSubStatus expire_publish( NatsStr &subj,  NatsLookup &pub ) {
-    kv::RouteLoc loc;
-    NatsStr      sid;
-    NatsMapRec * rt;
-    uint32_t     max_msgs = pub.rt->max_msgs;
-
-    pub.iter.off = subj.length();
-    for (;;) {
-      if ( ! pub.iter.get( sid ) )
-        break;
-      NatsPair val( sid );
-      rt = this->sid_map.find( sid.hash(), &val, 0, loc );
-      /* if the sid max matches the current minimum max, remove it */
-      if ( rt->max_msgs == pub.rt->max_msgs ) {
-        pub.iter.remove();
-        if ( rt->len == sid.length() + subj.length() )
-          this->sid_map.remove( loc );
-        else {
-          NatsIter iter;
-          iter.init( *rt );
-          /* if sid is a member of subscription */
-          if ( iter.is_member( subj ) ) {
-            iter.remove();
-            uint16_t new_len = rt->len - iter.rmlen;
-            this->sid_map.resize( sid.hash(), &val, rt->len, new_len, loc );
-          }
-        }
-      }
-      /* calculate the new minimum */
-      else {
-        if ( rt->max_msgs > pub.rt->max_msgs ) {
-          if ( max_msgs == pub.rt->max_msgs || rt->max_msgs < max_msgs )
-            max_msgs = rt->max_msgs;
-        }
-        pub.iter.incr();
-      }
-    }
-    /* if a new max, the sub stays alive */
-    if ( max_msgs != pub.rt->max_msgs ) {
-      pub.rt->max_msgs = max_msgs;
-      if ( pub.iter.rmlen > 0 ) {
-        uint16_t new_len = pub.rt->len - pub.iter.rmlen;
-        NatsPair val( subj );
-        this->sub_map.resize( subj.hash(), &val, pub.rt->len, new_len,
-                              pub.loc );
-      }
-      return NATS_OK;
-    }
-    /* all sids are dereferenced, sub is removed */
-    this->sub_map.remove( pub.loc );
-    return NATS_EXPIRED;
-  }
-  /* unsub sid <max-msgs>, remove or mark sid with max-msgs */
-  NatsSubStatus expire_sid( NatsStr &sid,  uint32_t max_msgs ) {
-    kv::RouteLoc loc;
-    NatsPair     val( sid );
-    NatsMapRec * rt = this->sid_map.find( sid.hash(), &val, 0, loc );
-    /* if sid exists */
-    if ( rt != NULL ) {
-      NatsIter iter;
-      NatsStr  subj;
-      uint32_t exp_cnt = 0,
-               subj_cnt = 0;
-      iter.init( *rt );
-      /* for each sid, deref the subject */
-      while ( iter.get( subj ) ) {
-        if ( this->expire_subj( subj, sid, max_msgs ) != NATS_OK ) {
-          iter.remove();
-          exp_cnt++;
-        }
-        else {
-          iter.incr();
-        }
-        subj_cnt++;
-      }
-      /* if all subjects derefed, remove sid */
-      if ( max_msgs == 0 || exp_cnt == subj_cnt ) {
-        this->sid_map.remove( loc );
-        return NATS_EXPIRED;
-      }
-      /* has a max-msgs that will expire after publishes */
-      else {
-        rt->max_msgs = max_msgs;
-        if ( exp_cnt > 0 ) {
-          uint16_t new_len = rt->len - iter.rmlen;
-          this->sid_map.resize( sid.hash(), &val, rt->len, new_len, loc );
-        }
-        return NATS_OK;
-      }
-    }
-    return NATS_NOT_FOUND;
-  }
-  NatsSubStatus lookup_sid( NatsStr &sid,  NatsLookup &uns ) {
-    NatsPair     val( sid );
-    uns.rt = this->sid_map.find( sid.hash(), &val, 0, uns.loc );
-    /* if sid exists */
-    if ( uns.rt == NULL )
+  NatsSubStatus unsub( SidEntry &entry, uint64_t max_msgs ) {
+    if ( entry.subj_hash != this->hash )
       return NATS_NOT_FOUND;
-    uns.iter.init( *uns.rt );
-    return NATS_OK;
-  }
-  /* remove subject or mark with max-msgs */
-  NatsSubStatus expire_subj( NatsStr &subj,  NatsStr &sid,
-                             uint32_t max_msgs ) {
-    kv::RouteLoc loc;
-    NatsPair     val( subj );
-    NatsMapRec * rt = this->sub_map.find( subj.hash(), &val, 0, loc );
-    /* if subject exists */
-    if ( rt != NULL ) {
-      NatsIter iter;
-      iter.init( *rt );
-      /* if sid is a member of subscription */
-      if ( iter.is_member( sid ) ) {
-        /* triggers if max_msgs == 0 (not-defined) or less than msg_cnt */
-        if ( max_msgs <= rt->msg_cnt ) {
-          uint16_t new_len = rt->len - iter.curlen;
-          /* if no more sids left */
-          if ( new_len == subj.length() ) {
-            this->sub_map.remove( loc );
-            return NATS_EXPIRED;
-          }
-          /* remove sid */
-          else {
-            NatsPair val( subj );
-            iter.remove();
-            this->sub_map.resize( subj.hash(), &val, rt->len, new_len, loc );
+    NatsStr sid( entry.value, entry.len );
+    NatsStr xsid;
+    for ( bool b = this->first_sid( xsid ); b; b = this->next_sid( xsid ) ) {
+      if ( sid.equals( xsid ) ) {
+        if ( max_msgs != 0 ) {
+          entry.max_msgs = entry.msg_cnt + max_msgs;
+          if ( entry.max_msgs > this->msg_cnt ) { /* max must be more than cnt*/
+            if ( this->max_msgs == 0 || entry.max_msgs < this->max_msgs )
+              this->max_msgs = entry.max_msgs; /* trigger unsub on publish */
             return NATS_OK;
           }
         }
-        /* max_msgs is greater than the msg_cnt, update the subject */
-        else {
-          if ( max_msgs != 0 ) {
-            if ( rt->max_msgs == 0 || max_msgs < rt->max_msgs )
-              rt->max_msgs = max_msgs;
+        this->remove_sid( xsid );
+        return NATS_EXPIRED; /* sid removed */
+      }
+    }
+    return NATS_NOT_FOUND; /* sid not a member of subject */
+  }
+  void print_sids( void ) noexcept;
+};
+struct NatsSubRoute : public NatsSubData {
+  static bool equals( const NatsSubRoute &r, const void *s, uint16_t l ) {
+    return r.NatsSubData::equals( s, l );
+  }
+  void print( void ) noexcept;
+};
+
+template<class Match>
+struct NatsWildData {
+  Match                   * next,
+                          * back;
+  pcre2_real_code_8       * re;   /* pcre to match the publish subject */
+  pcre2_real_match_data_8 * md;
+
+  NatsWildData( pcre2_real_code_8 *r,  pcre2_real_match_data_8 *m )
+    : next( 0 ), back( 0 ), re( r ), md( m ) {}
+};
+
+struct NatsWildMatch : public NatsWildData<NatsWildMatch>, public NatsSubData {
+  void * operator new( size_t, void *ptr ) { return ptr; }
+  void operator delete( void *ptr ) { ::free( ptr ); }
+
+  NatsWildMatch( NatsStr &subj,  NatsStr &sid,
+                 pcre2_real_code_8 *re,  pcre2_real_match_data_8 *md )
+      : NatsWildData( re, md ) {
+    this->NatsSubData::init( subj.len );
+    this->hash = subj.hash();
+    this->len  = subj.len + sid.len + 2;
+    ::memcpy( this->value, subj.str, subj.len );
+    this->NatsSubData::add_sid( sid );
+  }
+  ~NatsWildMatch();
+
+  static NatsWildMatch *create( NatsStr &subj,  NatsStr &sid,
+                                kv::PatternCvt &cvt ) noexcept;
+  static NatsWildMatch *resize_sid( NatsWildMatch *m,  NatsStr &sid ) noexcept;
+  bool match( NatsStr &subj ) noexcept;
+  void print( void ) noexcept;
+};
+
+struct NatsPatternRoute {
+  uint32_t                     hash,       /* hash of the pattern prefix */
+                               count;      /* count of matches */
+  kv::DLinkList<NatsWildMatch> list;       /* list of patterns with same pref */
+  uint16_t                     len;        /* length of the pattern prefix */
+  char                         value[ 2 ]; /* the pattern prefix */
+
+  void init( void ) {
+    this->count = 0;
+    this->list.init();
+  }
+  void print( void ) noexcept;
+};
+
+struct NatsLookup {
+  NatsSubRoute     * rt;
+  NatsPatternRoute * pat;
+  NatsWildMatch    * match,
+                   * next;
+  kv::RouteLoc       loc;
+  uint32_t           hash;
+  void init( uint32_t h = 0 ) {
+    this->rt    = NULL;
+    this->pat   = NULL;
+    this->match = NULL;
+    this->next  = NULL;
+    this->hash  = h;
+  }
+};
+
+struct NatsSubTab
+    : public kv::RouteVec<NatsSubRoute, nullptr, NatsSubRoute::equals> {
+  bool rem_collision( NatsSubRoute *rt ) {
+    kv::RouteLoc   loc;
+    NatsSubRoute * rt2;
+    rt->refcnt = 0;
+    if ( (rt2 = this->find_by_hash( rt->hash, loc )) != NULL ) {
+      do {
+        if ( rt2->refcnt != 0 )
+          return true;
+      } while ( (rt2 = this->find_next_by_hash( rt->hash, loc )) != NULL );
+    }
+    return false;
+  }
+  NatsSubStatus find3( uint32_t h,  const char *sub,  size_t len,
+                       bool &collision ) {
+    kv::RouteLoc loc;
+    uint32_t     hcnt;
+    NatsSubRoute * rt = this->find2( h, sub, len, loc, hcnt );
+    if ( rt == NULL ) {
+      collision = ( hcnt > 0 );
+      return NATS_NOT_FOUND;
+    }
+    collision = ( hcnt > 1 );
+    return NATS_OK;
+  }
+};
+
+struct NatsPatternTab : public kv::RouteVec<NatsPatternRoute> {
+  bool rem_collision( NatsPatternRoute *rt,  NatsWildMatch *m ) {
+    kv::RouteLoc       loc;
+    NatsPatternRoute * rt2;
+    NatsWildMatch    * m2;
+    m->refcnt = 0;
+    if ( (rt2 = this->find_by_hash( rt->hash, loc )) != NULL ) {
+      do {
+        for ( m2 = rt2->list.tl; m2 != NULL; m2 = m2->back ) {
+          if ( m2->refcnt != 0 )
+            return true;
+        }
+      } while ( (rt2 = this->find_next_by_hash( rt->hash, loc )) != NULL );
+    }
+    return false;
+  }
+  NatsSubStatus find3( uint32_t h,  const char *sub,  size_t len,
+                       NatsPatternRoute *&rt,  bool &collision ) {
+    kv::RouteLoc loc;
+    uint32_t hcnt;
+    rt = this->find2( h, sub, len, loc, hcnt );
+    if ( rt == NULL ) {
+      collision = ( hcnt > 0 );
+      return NATS_NOT_FOUND;
+    }
+    collision = ( hcnt > 1 );
+    return NATS_OK;
+  }
+};
+
+struct NatsSubMap {
+  NatsSubTab             sub_tab;
+  NatsPatternTab         pat_tab;
+  kv::RouteVec<SidEntry> sid_tab;
+
+  void print( void ) noexcept;
+  /* add a subject and sid */
+  NatsSubStatus put( NatsStr &subj,  NatsStr &sid,  bool &collision ) {
+    kv::RouteLoc loc;
+    SidEntry   * entry;
+    uint32_t     hcnt;
+
+    entry = this->sid_tab.upsert( sid.hash(), sid.str, sid.len, loc );
+    if ( entry == NULL || ! loc.is_new )
+      return NATS_EXISTS;
+    entry->init( subj.hash() );
+    NatsSubRoute *rt = this->sub_tab.upsert2( subj.hash(), subj.str, subj.len,
+                                              loc, hcnt );
+    if ( loc.is_new ) {
+      rt->init( subj.len );
+      collision = ( hcnt > 0 );
+    }
+    else {
+      entry->msg_cnt = rt->msg_cnt;
+      collision = ( hcnt > 1 );
+    }
+    if ( ! rt->add_sid( sid ) ) {
+      size_t newlen = (size_t) rt->sid_off + (size_t) sid.len + 2;
+      if ( newlen > 0xffffU )
+        rt = NULL;
+      else
+        rt = this->sub_tab.resize( subj.hash(), subj.str, subj.len, newlen,
+                                   loc );
+      if ( rt == NULL ) {
+        if ( loc.is_new )
+          this->sub_tab.remove( loc );
+        return NATS_TOO_MANY;
+      }
+      rt->add_sid( sid );
+    }
+    return loc.is_new ? NATS_IS_NEW : NATS_OK;
+  }
+  /* add a pattern and sid */
+  NatsSubStatus put_wild( NatsStr &subj,  kv::PatternCvt &cvt,
+                          NatsStr &pre,  NatsStr &sid,  bool &collision ) {
+    kv::RouteLoc    loc;
+    SidEntry      * entry;
+    NatsWildMatch * m = NULL, * m2;
+    uint32_t        hcnt;
+
+    entry = this->sid_tab.upsert( sid.hash(), sid.str, sid.len, loc );
+    if ( entry == NULL || ! loc.is_new )
+      return NATS_EXISTS;
+    entry->init( subj.hash(), pre.hash() );
+
+    NatsPatternRoute *rt = this->pat_tab.upsert2( pre.hash(), pre.str,
+                                                  pre.len, loc, hcnt );
+    if ( loc.is_new ) {
+      rt->init();
+      collision = ( hcnt > 0 );
+    }
+    else {
+      for ( m = rt->list.hd; m != NULL; m = m->next ) {
+        if ( m->equals( subj ) )
+          break;
+      }
+      collision = ( hcnt > 1 || m == NULL || rt->count > 1 );
+    }
+    /* new wildcard match */
+    if ( m == NULL ) {
+      m = NatsWildMatch::create( subj, sid, cvt );
+      if ( m == NULL ) {
+        if ( loc.is_new )
+          this->pat_tab.remove( loc );
+        return NATS_BAD_PATTERN;
+      }
+      rt->list.push_hd( m );
+      rt->count++;
+      return NATS_IS_NEW;
+    }
+    /* existing wildcard match */
+    if ( ! m->add_sid( sid ) ) {
+      rt->list.pop( m );
+      m2 = NatsWildMatch::resize_sid( m, sid );
+      if ( m2 == NULL ) {
+        rt->list.push_hd( m );
+        return NATS_TOO_MANY;
+      }
+      m = m2;
+      rt->list.push_hd( m );
+    }
+    entry->msg_cnt = m->msg_cnt;
+    return NATS_OK;
+  }
+  /* unsubscribe an sid */
+  NatsSubStatus unsub( NatsStr &sid,  uint64_t max_msgs,  NatsLookup &look,
+                       bool &collision ) {
+    kv::RouteLoc   sid_loc;
+    SidEntry     * entry;
+    NatsSubStatus  status;
+    uint32_t       count = 0;
+
+    look.init();
+    collision = false;
+    entry = this->sid_tab.find( sid.hash(), sid.str, sid.len, sid_loc );
+    if ( entry == NULL )
+      return NATS_NOT_FOUND;
+    if ( entry->pref_hash == 0 ) {
+      look.hash = entry->subj_hash;
+      look.rt = this->sub_tab.find_by_hash( look.hash, look.loc );
+      if ( look.rt == NULL )
+        return NATS_NOT_FOUND;
+      for (;;) {
+        status = look.rt->unsub( *entry, max_msgs );
+        if ( status != NATS_NOT_FOUND ) {
+          if ( status == NATS_EXPIRED ) {
+            this->sid_tab.remove( sid_loc );
+            if ( look.rt->refcnt == 0 ) {
+              if ( count > 0 )
+                collision = true;
+              else {
+                kv::RouteLoc next = look.loc;
+                if ( this->sub_tab.find_next_by_hash( look.hash,
+                                                      next ) != NULL )
+                  collision = true;
+              }
+              return NATS_EXPIRED;
+            }
           }
           return NATS_OK;
         }
+        look.rt = this->sub_tab.find_next_by_hash( look.hash, look.loc );
+        if ( look.rt == NULL )
+          return NATS_NOT_FOUND;
+        count++;
+      }
+    }
+    else {
+      look.hash = entry->pref_hash;
+      look.pat = this->pat_tab.find_by_hash( look.hash, look.loc );
+      if ( look.pat == NULL )
+        return NATS_NOT_FOUND;
+      for (;;) {
+        for ( NatsWildMatch *m = look.pat->list.hd; m != NULL; m = m->next ) {
+          if ( m->hash == entry->subj_hash ) {
+            status = m->unsub( *entry, max_msgs );
+            if ( status != NATS_NOT_FOUND ) {
+              if ( status == NATS_EXPIRED ) {
+                this->sid_tab.remove( sid_loc );
+                if ( m->refcnt == 0 ) {
+                  if ( count > 0 || look.pat->count > 1 )
+                    collision = true;
+                  else {
+                    kv::RouteLoc next = look.loc;
+                    if ( this->pat_tab.find_next_by_hash( look.hash,
+                                                          next ) != NULL )
+                      collision = true;
+                  }
+                  look.match = m;
+                  return NATS_EXPIRED;
+                }
+              }
+              return NATS_OK;
+            }
+          }
+        }
+        look.pat = this->pat_tab.find_next_by_hash( look.hash, look.loc );
+        if ( look.pat == NULL )
+          return NATS_NOT_FOUND;
+        count++;
+      }
+    }
+  }
+  /* remove after unsubscribe */
+  void unsub_remove( NatsLookup &look ) {
+    if ( look.rt != NULL ) {
+      this->sub_tab.remove( look.loc );
+      look.rt = NULL;
+    }
+    else {
+      look.pat->list.pop( look.match );
+      delete look.match;
+      look.match = NULL;
+      if ( --look.pat->count == 0 ) {
+        this->pat_tab.remove( look.loc );
+        look.pat = NULL;
+      }
+    }
+  }
+  /* remove sids that are == to max_msgs */
+  bool expire_sids( NatsSubData &data ) {
+    kv::RouteLoc sid_loc;
+    NatsStr      sid;
+    uint64_t     new_max_msgs = 0;
+    for ( bool b = data.first_sid( sid ); b; ) {
+      SidEntry *entry = this->sid_tab.find( sid.hash(), sid.str, sid.len,
+                                            sid_loc );
+      if ( entry != NULL ) {
+        /* if this entry is expired */
+        if ( entry->max_msgs == data.max_msgs )
+          this->sid_tab.remove( sid_loc );
+        else { /* find the new max_msgs */
+          if ( entry->max_msgs > data.max_msgs ) {
+            if ( new_max_msgs == 0 || new_max_msgs > entry->max_msgs )
+              new_max_msgs = entry->max_msgs; /* minimum > rt->max_msgs */
+          }
+          b = data.next_sid( sid );
+          continue;
+        }
+      }
+      b = data.remove_and_next_sid( sid );
+    }
+    data.max_msgs = new_max_msgs;
+    return data.refcnt == 0; /* true if no more sids */
+  }
+  /* when sid expired after publish */
+  NatsSubStatus expired( NatsLookup &look,  bool &collision ) {
+    collision = false;
+    if ( this->expire_sids( *look.rt ) ) {
+      kv::RouteLoc loc;
+      /* one of these is the current subject */
+      if ( this->sub_tab.find_by_hash( look.hash, loc ) != NULL &&
+           this->sub_tab.find_next_by_hash( look.hash, loc ) != NULL )
+        collision = true;
+      return NATS_EXPIRED;
+    }
+    return NATS_OK;
+  }
+  NatsSubStatus expired_pattern( NatsLookup &look,  bool &collision ) {
+    collision = false;
+    if ( this->expire_sids( *look.match ) ) {
+      kv::RouteLoc loc;
+      /* if multiple patterns with the same prefix */
+      if ( look.pat->count > 1 )
+        collision = true;
+      /* one of these is the current subject */
+      else if ( this->pat_tab.find_by_hash( look.hash, loc ) != NULL &&
+                this->pat_tab.find_next_by_hash( look.hash, loc ) != NULL )
+        collision = true;
+      return NATS_EXPIRED;
+    }
+    return NATS_OK;
+  }
+  /* find the subject and sid list to publish */
+  NatsSubStatus lookup_publish( NatsStr &subj,  NatsLookup &look ) {
+    look.init( subj.hash() );
+    look.rt = this->sub_tab.find( look.hash, subj.str, subj.len, look.loc );
+    if ( look.rt == NULL )
+      return NATS_NOT_FOUND;
+    if ( ++look.rt->msg_cnt == look.rt->max_msgs )
+      return NATS_EXPIRED;
+    return NATS_OK;
+  }
+  /* find the pattern prefix and match pattern to publish */
+  NatsSubStatus lookup_pattern( NatsStr &pre,  NatsStr &subj,
+                                NatsLookup &look ) {
+    look.init( pre.hash() );
+    look.pat = this->pat_tab.find( look.hash, pre.str, pre.len, look.loc );
+    if ( look.pat == NULL )
+      return NATS_NOT_FOUND;
+    for ( NatsWildMatch *m = look.pat->list.hd; m != NULL; m = m->next ) {
+      if ( m->re == NULL || m->match( subj ) ) {
+        look.match = m;
+        look.next  = m->next;
+        if ( ++m->msg_cnt == m->max_msgs )
+          return NATS_EXPIRED;
+        return NATS_OK;
       }
     }
     return NATS_NOT_FOUND;
   }
-
-  void print( void ) {
-    printf( "subj:\n" );
-    print_tab( this->sub_map );
-    printf( "sid:\n" );
-    print_tab( this->sid_map );
-  }
-
-  void print_tab( NatsMap &map ) {
-    NatsMapRec * rt;
-    uint32_t     i;
-    uint16_t     off;
-    NatsStr      one, two;
-
-    for ( rt = map.first( i, off ); rt != NULL;
-          rt = map.next( i, off ) ) {
-      one.read( rt->value );
-      printf( " [%u.%u,%x", i, off, rt->hash );
-      if ( rt->hash != one.hash() )
-        printf( ",!h!" );
-      kv::RouteLoc loc;
-      NatsPair tmp( one );
-      if ( map.find( rt->hash, &tmp, 0, loc ) != rt )
-        printf( ",!r!" );
-      else
-        printf( ",%u", loc.j );
-      printf( "] cnt=%u,max=%u,%.*s: ", rt->msg_cnt, rt->max_msgs,
-              (int) one.len, one.str );
-      NatsIter iter;
-      iter.init( *rt );
-      if ( iter.get( two ) ) {
-        printf( "%.*s", (int) two.len, two.str );
-        for (;;) {
-          iter.incr();
-          if ( ! iter.get( two ) )
-            break;
-          printf( ", %.*s", (int) two.len, two.str );
-        }
+  /* find the next patter to publish after above, may match multiple */
+  NatsSubStatus lookup_next( NatsStr &subj,  NatsLookup &look ) {
+    for ( NatsWildMatch *m = look.next; m != NULL; m = m->next ) {
+      if ( m->re == NULL || m->match( subj ) ) {
+        look.match = m;
+        look.next  = m->next;
+        if ( ++m->msg_cnt == m->max_msgs )
+          return NATS_EXPIRED;
+        return NATS_OK;
       }
-      printf( "\n" );
     }
+    return NATS_NOT_FOUND;
+  }
+  void release( void ) {
+    kv::RouteLoc       loc;
+    NatsPatternRoute * rt;
+    NatsWildMatch    * m,
+                     * next;
+    if ( (rt = this->pat_tab.first( loc )) != NULL ) {
+      do {
+        for ( m = rt->list.hd; m != NULL; m = next ) {
+          next = m->next;
+          delete m;
+        }
+      } while ( (rt = this->pat_tab.next( loc )) != NULL );
+    }
+    this->sid_tab.release();
+    this->sub_tab.release();
+    this->pat_tab.release();
   }
 };
 

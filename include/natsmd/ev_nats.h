@@ -11,7 +11,7 @@ struct EvNatsListen : public kv::EvTcpListen {
   void * operator new( size_t, void *ptr ) { return ptr; }
   EvNatsListen( kv::EvPoll &p ) noexcept;
   virtual bool accept( void ) noexcept;
-  int listen( const char *ip,  int port,  int opts ) {
+  virtual int listen( const char *ip,  int port,  int opts ) noexcept {
     return this->kv::EvTcpListen::listen( ip, port, opts, "nats_listen" );
   }
 };
@@ -42,8 +42,6 @@ struct EvNatsService : public kv::EvConnection {
   size_t     reply_len;   /* len of reply */
   char     * sid;         /* <sid> of SUB */
   size_t     sid_len;     /* len of sid */
-  char     * msg_len_ptr;    /* ptr to msg_len ascii */
-  size_t     msg_len_digits; /* number of digits in msg_len */
   size_t     tmp_size;       /* amount of buffer[] free */
   char       buffer[ 1024 ]; /* ptrs below index into this space */
 
@@ -66,9 +64,8 @@ struct EvNatsService : public kv::EvConnection {
     this->pedantic = this->tls_require = false;
     this->echo = true;
 
-    this->subject = this->reply = this->sid = this->msg_len_ptr = NULL;
+    this->subject = this->reply = this->sid = NULL;
     this->subject_len = this->reply_len = this->sid_len =
-    this->msg_len_digits = 0;
     this->tmp_size = sizeof( this->buffer );
 
     this->protocol = 1;
@@ -85,9 +82,7 @@ struct EvNatsService : public kv::EvConnection {
     return NULL;
   }
   void add_sub( void ) noexcept;
-  void add_wild( NatsStr &xsubj ) noexcept;
-  void rem_sid( uint32_t max_msgs ) noexcept;
-  void rem_wild( NatsStr &xsubj ) noexcept;
+  void rem_sid( uint64_t max_msgs ) noexcept;
   void rem_all_sub( void ) noexcept;
   bool fwd_pub( void ) noexcept;
   bool fwd_msg( kv::EvPublish &pub,  const void *sid,  size_t sid_len ) noexcept;
@@ -98,6 +93,8 @@ struct EvNatsService : public kv::EvConnection {
   virtual bool timer_expire( uint64_t tid, uint64_t eid ) noexcept final;
   virtual bool hash_to_sub( uint32_t h, char *k, size_t &klen ) noexcept final;
   virtual bool on_msg( kv::EvPublish &pub ) noexcept final;
+  virtual uint8_t is_subscribed( const kv::NotifySub &sub ) noexcept final;
+  virtual uint8_t is_psubscribed( const kv::NotifyPattern &pat ) noexcept final;
 };
 
 /* presumes little endian, 0xdf masks out 0x20 for toupper() */

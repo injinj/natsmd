@@ -127,9 +127,7 @@ struct EvNatsClient : public kv::EvConnection, public kv::RouteNotify {
   size_t       reply_len;      /* len of reply */
   char       * sid;            /* <sid> of SUB */
   size_t       sid_len;        /* len of sid */
-  char       * msg_len_ptr;    /* ptr to msg_len ascii */
-  size_t       msg_len_digits, /* number of digits in msg_len */
-               tmp_size;       /* amount of buffer[] free */
+  size_t       tmp_size;       /* amount of buffer[] free */
   char         buffer[ 1024 ], /* ptrs below index into this space */
              * err;            /* if -ERR, then err points to end of buffer */
   size_t       err_len;        /* length of err */
@@ -163,9 +161,8 @@ struct EvNatsClient : public kv::EvConnection, public kv::RouteNotify {
     this->msg_ptr        = NULL;
     this->msg_len        = 0;
     this->msg_state      = NATS_HDR_STATE;
-    this->subject        = this->reply = this->sid = this->msg_len_ptr = NULL;
-    this->subject_len    = this->reply_len = this->sid_len =
-    this->msg_len_digits = 0;
+    this->subject        = this->reply = this->sid = NULL;
+    this->subject_len    = this->reply_len = this->sid_len = 0;
     this->tmp_size       = sizeof( this->buffer );
     this->err            = NULL;
     this->err_len        = 0;
@@ -231,24 +228,14 @@ struct EvNatsClient : public kv::EvConnection, public kv::RouteNotify {
   /* RouteNotify */
   /* a new subscription */
   void do_sub( uint32_t h,  const char *sub,  size_t sublen ) noexcept;
-  virtual void on_sub( uint32_t h,  const char *sub,  size_t sublen,
-                       uint32_t src_fd,  uint32_t rcnt,  char src_type,
-                       const char *rep,  size_t rlen ) noexcept;
+  virtual void on_sub( kv::NotifySub &sub ) noexcept;
   /* an unsubscribed sub */
-  virtual void on_unsub( uint32_t h,  const char *sub,  size_t sublen,
-                         uint32_t src_fd,  uint32_t rcnt,
-                         char src_type ) noexcept;
+  virtual void on_unsub( kv::NotifySub &sub ) noexcept;
   /* a new pattern subscription */
   void do_psub( uint32_t h,  const char *prefix,  uint8_t prefix_len ) noexcept;
-  virtual void on_psub( uint32_t h,  const char *pattern,  size_t patlen,
-                        const char *prefix,  uint8_t prefix_len,
-                        uint32_t src_fd,  uint32_t rcnt,
-                        char src_type ) noexcept;
+  virtual void on_psub( kv::NotifyPattern &pat ) noexcept;
   /* an unsubscribed pattern sub */
-  virtual void on_punsub( uint32_t h,  const char *pattern,  size_t patlen,
-                          const char *prefix,  uint8_t prefix_len,
-                          uint32_t src_fd,  uint32_t rcnt,
-                          char src_type ) noexcept;
+  virtual void on_punsub( kv::NotifyPattern &pat ) noexcept;
   /* reassert subs after reconnect */
   virtual void on_reassert( uint32_t fd,  kv::RouteVec<kv::RouteSub> &sub_db,
                             kv::RouteVec<kv::RouteSub> &pat_db ) noexcept;

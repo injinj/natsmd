@@ -6,6 +6,7 @@
 #include <raikv/ev_publish.h>
 #include <raikv/kv_pubsub.h>
 #include <raikv/bit_set.h>
+#include <raikv/pattern_cvt.h>
 #include <raimd/json_msg.h>
 
 using namespace rai;
@@ -29,6 +30,7 @@ getenv_bool( const char *var )
 
 EvNatsClient::EvNatsClient( EvPoll &p ) noexcept
     : EvConnection( p, p.register_type( "natsclient" ) ),
+      RouteNotify( p.sub_route ),
       sub_route( p.sub_route ),
       next_sid( 1 ), protocol( 1 ), fwd_all_msgs( 1 ), fwd_all_subs( 1 ),
       max_payload( 1024 * 1024 ), name( 0 ),
@@ -158,9 +160,7 @@ EvNatsClient::process( void ) noexcept
                   this->reply     = NULL;
                   this->reply_len = 0;
                 }
-                this->msg_len_ptr    = &size_start[ 1 ];
-                this->msg_len_digits = size_len;
-                this->msg_state      = NATS_PUB_STATE;
+                this->msg_state = NATS_PUB_STATE;
                 break;
 
               case NATS_KW_ERR: /* put the last error in buffer[] */
@@ -293,8 +293,7 @@ EvNatsClient::fwd_pub( void ) noexcept
   EvPublish pub( this->subject, this->subject_len,
                  this->reply, this->reply_len,
                  this->msg_ptr, this->msg_len,
-                 this->fd, xsub.hash(),
-                 this->msg_len_ptr, this->msg_len_digits,
+                 this->sub_route, this->fd, xsub.hash(),
                  MD_STRING, 'p' );
   uint32_t       pmatch;
   bool           flow = true;
@@ -307,10 +306,8 @@ EvNatsClient::fwd_pub( void ) noexcept
     if ( trail.is_fragment( xsub.hash(), this->max_payload ) ) {
       if ( (frag = this->merge_fragment( trail, this->msg_ptr,
                                          this->msg_len )) != NULL ) {
-        pub.msg_len        = frag->msg_len;
-        pub.msg            = frag->msg_ptr();
-        pub.msg_len_buf    = NULL;
-        pub.msg_len_digits = 0;
+        pub.msg_len = frag->msg_len;
+        pub.msg     = frag->msg_ptr();
       }
       else {
         return true; /* partial message, wait for all frags */
@@ -489,9 +486,7 @@ EvNatsClient::on_msg( EvPublish &pub ) noexcept
             (int) pub.reply_len, (char *) pub.reply );
   /* construct PUB subject <reply> <length \r\n <blob> */
   if ( pub.msg_len <= this->max_payload ) {
-    msg_len_digits =
-             ( pub.msg_len_digits > 0 ? pub.msg_len_digits :
-               uint64_digits( pub.msg_len ) );
+    msg_len_digits = uint64_digits( pub.msg_len );
     len = 4 + pub.subject_len + 1 +                /* PUB <subject> */
       ( pub.reply_len > 0 ? pub.reply_len + 1 : 0 ) + /* [reply] */
                  msg_len_digits + 2 +             /* <size> \r\n */
@@ -503,13 +498,8 @@ EvNatsClient::on_msg( EvPublish &pub ) noexcept
       p = concat_hdr( p, (const char *) pub.reply, pub.reply_len );
       *p++ = ' ';
     }
-    if ( pub.msg_len_digits == 0 ) {
-      uint64_to_string( pub.msg_len, p, msg_len_digits );
-      p = &p[ msg_len_digits ];
-    }
-    else {
-      p = concat_hdr( p, pub.msg_len_buf, msg_len_digits );
-    }
+    uint64_to_string( pub.msg_len, p, msg_len_digits );
+    p = &p[ msg_len_digits ];
 
     *p++ = '\r'; *p++ = '\n';
     ::memcpy( p, pub.msg, pub.msg_len );
@@ -632,21 +622,19 @@ EvNatsClient::do_sub( uint32_t h,  const char *sub,  size_t sublen ) noexcept
 }
 /* forward subscribe subject: SUB subject sid */
 void
-EvNatsClient::on_sub( uint32_t h,  const char *sub,  size_t sublen,
-                      uint32_t /*fd*/,  uint32_t /*rcnt*/,  char /*tp*/,
-                      const char * /*rep*/,  size_t /*rlen*/) noexcept
+EvNatsClient::on_sub( NotifySub &sub ) noexcept
 {
-  this->do_sub( h, sub, sublen );
+  this->do_sub( sub.subj_hash, sub.subject, sub.subject_len );
   this->idle_push( EV_WRITE );
 }
 /* forward unsubscribe subject: UNSUB sid */
 void
-EvNatsClient::on_unsub( uint32_t h,  const char *sub,  size_t sublen,
-                        uint32_t /*fd*/,  uint32_t rcnt, char /*tp*/) noexcept
+EvNatsClient::on_unsub( NotifySub &sub ) noexcept
 {
-  if ( rcnt != 0 ) /* if no routes left */
+  if ( sub.sub_count != 0 ) /* if no routes left */
     return;
-  uint32_t sid        = this->remove_sid( h, sub, sublen ),
+  uint32_t sid        = this->remove_sid( sub.subj_hash, sub.subject,
+                                          sub.subject_len ),
            sid_digits = uint32_digits( sid );
   if ( sid != 0 ) {
     size_t   len = 6 +             /* UNSUB */
@@ -707,11 +695,10 @@ EvNatsClient::do_psub( uint32_t h,  const char *prefix,
 }
 /* forward pattern subscribe: SUB wildcard -sid */
 void
-EvNatsClient::on_psub( uint32_t h,  const char * /*pat*/,
-                       size_t /*patlen*/,  const char *prefix,
-                       uint8_t prefix_len,  uint32_t /*fd*/,
-                       uint32_t /*rcnt*/,  char /*tp*/) noexcept
+EvNatsClient::on_psub( NotifyPattern &pat ) noexcept
 {
+  size_t prefix_len = pat.cvt.prefixlen;
+  const char * prefix = pat.pattern;
   bool fwd;
   /* prefix must end with a '.' */
   if ( prefix_len > 0 && prefix[ prefix_len - 1 ] == '.' )
@@ -725,17 +712,16 @@ EvNatsClient::on_psub( uint32_t h,  const char * /*pat*/,
     fwd = true;
   if ( ! fwd )
     return;
-  this->do_psub( h, prefix, prefix_len );
+  this->do_psub( pat.prefix_hash, prefix, prefix_len );
   this->idle_push( EV_WRITE );
 }
 /* forward pattern unsubscribe: UNSUB -sid */
 void
-EvNatsClient::on_punsub( uint32_t h,  const char * /*pat*/,
-                         size_t /*patlen*/,  const char *prefix,
-                         uint8_t prefix_len,  uint32_t /*fd*/,
-                         uint32_t rcnt,  char /*tp*/) noexcept
+EvNatsClient::on_punsub( NotifyPattern &pat ) noexcept
 {
-  if ( rcnt != 0 ) /* if no routes left */
+  size_t prefix_len = pat.cvt.prefixlen;
+  const char * prefix = pat.pattern;
+  if ( pat.sub_count != 0 ) /* if no routes left */
     return;
   bool fwd;
   /* prefix must end with a '.' */
@@ -750,12 +736,12 @@ EvNatsClient::on_punsub( uint32_t h,  const char * /*pat*/,
     fwd = true;
   if ( ! fwd )
     return;
-  uint32_t sid        = this->remove_sid( h, prefix, prefix_len ),
+  uint32_t sid        = this->remove_sid( pat.prefix_hash, prefix, prefix_len ),
            sid_digits = uint32_digits( sid );
   if ( sid != 0 ) {
     uint8_t w = ( prefix_len == 0 ? 0 : prefix[ 0 ] );
     this->clear_wildcard_match( w );
-    this->pat_tab.remove( h, prefix, prefix_len );
+    this->pat_tab.remove( pat.prefix_hash, prefix, prefix_len );
 
     size_t   len        = 6 +                 /* UNSUB */
                           1 + sid_digits + 2; /* -<sid>\r\n */

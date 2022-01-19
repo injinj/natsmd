@@ -250,8 +250,6 @@ EvNatsService::process( void ) noexcept
                   this->reply     = NULL;
                   this->reply_len = 0;
                 }
-                this->msg_len_ptr    = &size_start[ 1 ];
-                this->msg_len_digits = size_len;
                 this->msg_state = NATS_PUB_STATE;
                 break;
               case NATS_KW_PING:
@@ -307,9 +305,11 @@ EvNatsService::process( void ) noexcept
             p++;
             used++;
           }
+          if ( verb_ok == DO_OK )
+            this->append( ok, sizeof( ok ) - 1 );
           if ( ! this->fwd_pub() )
             fl |= FLOW_BACKPRESSURE;
-          fl |= verb_ok;
+          /*fl |= verb_ok;*/
           /*msg_cnt++;*/
         }
         else { /* not enough to consume message */
@@ -344,170 +344,137 @@ break_loop:;
   return;
 }
 
+uint8_t
+EvNatsService::is_subscribed( const NotifySub &sub ) noexcept
+{
+  uint8_t v    = 0;
+  bool    coll = false;
+  if ( this->map.sub_tab.find3( sub.subj_hash, sub.subject, sub.subject_len,
+                                coll ) == NATS_OK )
+    v |= EV_SUBSCRIBED;
+  else
+    v |= EV_NOT_SUBSCRIBED;
+  if ( coll )
+    v |= EV_COLLISION;
+  return v;
+}
+
+uint8_t
+EvNatsService::is_psubscribed( const NotifyPattern &pat ) noexcept
+{
+  uint8_t v    = 0;
+  bool    coll = false;
+  const PatternCvt & cvt = pat.cvt;
+  NatsPatternRoute * rt;
+  if ( this->map.pat_tab.find3( pat.prefix_hash, pat.pattern, cvt.prefixlen,
+                                rt, coll ) == NATS_OK ) {
+    NatsWildMatch *m;
+    for ( m = rt->list.hd; m != NULL; m = m->next ) {
+      if ( m->len == pat.pattern_len &&
+           ::memcmp( pat.pattern, m->value, m->len ) == 0 ) {
+        v |= EV_SUBSCRIBED;
+        break;
+      }
+    }
+    if ( m == NULL )
+      v |= EV_NOT_SUBSCRIBED | EV_COLLISION;
+    else if ( rt->count > 1 )
+      v |= EV_COLLISION;
+  }
+  else {
+    v |= EV_NOT_SUBSCRIBED;
+  }
+  if ( coll )
+    v |= EV_COLLISION;
+  return v;
+}
+
 void
 EvNatsService::add_sub( void ) noexcept
 {
-  NatsStr xsid( this->sid, this->sid_len );
-  NatsStr xsubj( this->subject, this->subject_len );
-
-  if ( this->map.put( xsubj, xsid ) == NATS_IS_NEW ) {
-    if ( xsubj.is_wild() ) {
-      this->add_wild( xsubj );
-    }
-    else {
-      uint32_t rcnt = this->sub_route.add_sub_route( xsubj.hash(), this->fd );
-      this->sub_route.notify_sub( xsubj.hash(), xsubj.str, xsubj.len,
-                                  this->fd, rcnt, 'N' );
-    }
-  }
-#if 0
-  printf( "add_sub:\n" );
-  this->map.print();
-#endif
-}
-
-void
-EvNatsService::add_wild( NatsStr &xsubj ) noexcept
-{
-  NatsWildRec * rt;
-  PatternCvt    cvt;
-  uint32_t      h, rcnt;
-  size_t        erroff;
-  int           error;
-
-  if ( cvt.convert_rv( xsubj.str, xsubj.len ) == 0 ) {
-    h = kv_crc_c( xsubj.str, cvt.prefixlen,
-                  this->sub_route.prefix_seed( cvt.prefixlen ) );
-    rt = this->map.add_wild( h, xsubj );
-    if ( rt == NULL || rt->re != NULL )
-      return;
-    rt->re = pcre2_compile( (uint8_t *) cvt.out, cvt.off, 0,
-                            &error, &erroff, 0 );
-    if ( rt->re == NULL ) {
-      fprintf( stderr, "re failed\n" );
-    }
-    else {
-      rt->md = pcre2_match_data_create_from_pattern( rt->re, NULL );
-      if ( rt->md == NULL ) {
-        pcre2_code_free( rt->re );
-        rt->re = NULL;
-        fprintf( stderr, "md failed\n" );
-      }
-    }
-    if ( rt->re == NULL ) {
-      this->map.rem_wild( h, xsubj );
-      return;
-    }
-    rcnt = this->sub_route.add_pattern_route( h, this->fd, cvt.prefixlen );
-    this->sub_route.notify_psub( h, cvt.out, cvt.off, xsubj.str, cvt.prefixlen,
-                                 this->fd, rcnt, 'N' );
-  }
-}
-
-void
-NatsSubMap::rem_wild( uint32_t h,  NatsStr &subj ) noexcept
-{
-  RouteLoc      loc;
-  NatsWildRec * rt;
-  if ( (rt = this->wild_map.find( h, subj.str, subj.len, loc )) != NULL ) {
-    if ( rt->md != NULL ) {
-      pcre2_match_data_free( rt->md );
-      rt->md = NULL;
-    }
-    if ( rt->re != NULL ) {
-      pcre2_code_free( rt->re );
-      rt->re = NULL;
-    }
-    this->wild_map.remove( loc );
-  }
-}
-
-void
-EvNatsService::rem_wild( NatsStr &xsubj ) noexcept
-{
-  PatternCvt cvt;
-  uint32_t   h, rcnt;
-
-  if ( cvt.convert_rv( xsubj.str, xsubj.len ) == 0 ) {
-    h = kv_crc_c( xsubj.str, cvt.prefixlen,
-                  this->sub_route.prefix_seed( cvt.prefixlen ) );
-    rcnt = this->sub_route.del_pattern_route( h, this->fd, cvt.prefixlen );
-    this->sub_route.notify_punsub( h, cvt.out, cvt.off, xsubj.str,
-                                   cvt.prefixlen, this->fd, rcnt, 'N' );
-    this->map.rem_wild( h, xsubj );
-  }
-}
-
-void
-EvNatsService::rem_sid( uint32_t max_msgs ) noexcept
-{
-  NatsStr       xsid( this->sid, this->sid_len ),
-                xsubj;
-  NatsLookup    look;
-  uint32_t      exp_cnt  = 0,
-                subj_cnt = 0;
+  NatsStr sid( this->sid, this->sid_len );
+  NatsStr subj( this->subject, this->subject_len );
+  bool    coll = false;
   NatsSubStatus status;
 
-  if ( this->map.lookup_sid( xsid, look ) == NATS_OK ) {
-    while ( look.iter.get( xsubj ) ) {
-      uint32_t h = xsubj.hash();
-      status = this->map.expire_subj( xsubj, xsid, max_msgs );
-      if ( status == NATS_EXPIRED ) {
-        if ( xsubj.is_wild() )
-          this->rem_wild( xsubj );
-        else {
-          uint32_t rcnt = 0;
-          if ( this->map.sub_map.find_by_hash( h ) == NULL )
-            rcnt = this->sub_route.del_sub_route( h, this->fd );
-          this->sub_route.notify_unsub( h, xsubj.str, xsubj.len,
-                                        this->fd, rcnt, 'N' );
-        }
-      }
-      if ( status != NATS_OK ) {
-        exp_cnt++;
-        look.iter.remove();
-      }
-      else {
-        look.iter.incr();
-      }
-      subj_cnt++;
-    }
-    /* no more subs left */
-    if ( max_msgs == 0 || exp_cnt == subj_cnt )
-      this->map.sid_map.remove( look.loc );
-    else { /* wait for max msgs */
-      look.rt->max_msgs = max_msgs;
-      if ( exp_cnt > 0 ) {
-        NatsPair val( xsid );
-        uint16_t new_len = look.rt->len - look.iter.rmlen;
-        this->map.sid_map.resize( xsid.hash(), &val, look.rt->len, new_len,
-                                  look.loc );
+  if ( subj.is_wild() ) {
+    PatternCvt cvt;
+    if ( cvt.convert_rv( subj.str, subj.len ) != 0 )
+      status = NATS_BAD_PATTERN;
+    else {
+      uint32_t h = kv_crc_c( subj.str, cvt.prefixlen,
+                             this->sub_route.prefix_seed( cvt.prefixlen ) );
+      NatsStr pre( subj.str, cvt.prefixlen, h );
+      status = this->map.put_wild( subj, cvt, pre, sid, coll );
+      if ( status == NATS_IS_NEW ) {
+        NotifyPattern npat( cvt, subj.str, subj.len, h, this->fd, coll, 'N' );
+        this->sub_route.add_pat( npat );
       }
     }
   }
-#if 0
-  printf( "rem_sid(%u):\n", max_msgs );
-  this->map.print();
-#endif
+  else {
+    status = this->map.put( subj, sid, coll );
+    if ( status == NATS_IS_NEW ) {
+      NotifySub nsub( subj.str, subj.len, subj.hash(), this->fd, coll, 'N' );
+      this->sub_route.add_sub( nsub );
+    }
+  }
+  if ( status > NATS_EXISTS ) {
+    fprintf( stderr, "add_sub( %.*s, %.*s ) = %s\n",
+             subj.len, subj.str, sid.len, sid.str, nats_status_str( status ) );
+  }
+}
+
+void
+EvNatsService::rem_sid( uint64_t max_msgs ) noexcept
+{
+  NatsStr       sid( this->sid, this->sid_len );
+  NatsLookup    look;
+  NatsSubStatus status;
+  bool          coll = false;
+
+  status = map.unsub( sid, max_msgs, look, coll );
+  if ( status == NATS_EXPIRED ) {
+    if ( look.rt != NULL ) {
+      NotifySub nsub( look.rt->value, look.rt->len, look.hash, this->fd,
+                      coll, 'N' );
+      this->sub_route.del_sub( nsub );
+    }
+    else {
+      PatternCvt cvt;
+      if ( cvt.convert_rv( look.match->value, look.match->len ) == 0 ) {
+        NotifyPattern npat( cvt, look.match->value, look.match->len, look.hash,
+                            this->fd, coll, 'N' );
+        this->sub_route.del_pat( npat );
+      }
+    }
+    map.unsub_remove( look );
+  }
 }
 
 void
 EvNatsService::rem_all_sub( void ) noexcept
 {
-  NatsMapRec * rt;
-  uint32_t     i;
-  uint16_t     off;
-  NatsStr      xsubj;
+  RouteLoc           loc;
+  NatsSubRoute     * r;
+  NatsPatternRoute * p;
 
-  for ( rt = this->map.sub_map.first( i, off ); rt != NULL;
-        rt = this->map.sub_map.next( i, off ) ) {
-    xsubj.read( rt->value );
-    if ( xsubj.is_wild() )
-      this->rem_wild( xsubj );
-    else {
-      uint32_t rcnt = this->sub_route.del_sub_route( rt->hash, this->fd );
-      this->sub_route.notify_unsub( rt->hash, xsubj.str, xsubj.len,
-                                    this->fd, rcnt, 'N' );
+  for ( r = this->map.sub_tab.first( loc ); r;
+        r = this->map.sub_tab.next( loc ) ) {
+    bool coll = this->map.sub_tab.rem_collision( r );
+    NotifySub nsub( r->value, r->len, r->hash, this->fd, coll, 'V' );
+    this->sub_route.del_sub( nsub );
+  }
+  for ( p = this->map.pat_tab.first( loc ); p;
+        p = this->map.pat_tab.next( loc ) ) {
+    for ( NatsWildMatch *m = p->list.hd; m != NULL; m = m->next ) {
+      PatternCvt cvt;
+      if ( cvt.convert_rv( m->value, m->len ) == 0 ) {
+        bool coll = this->map.pat_tab.rem_collision( p, m );
+        NotifyPattern npat( cvt, m->value, m->len, p->hash,
+                            this->fd, coll, 'V' );
+        this->sub_route.del_pat( npat );
+      }
     }
   }
 }
@@ -515,12 +482,11 @@ EvNatsService::rem_all_sub( void ) noexcept
 bool
 EvNatsService::fwd_pub( void ) noexcept
 {
-  NatsStr   xsub( this->subject, this->subject_len );
+  uint32_t  h = kv_crc_c( this->subject, this->subject_len, 0 );
   EvPublish pub( this->subject, this->subject_len,
                  this->reply, this->reply_len,
                  this->msg_ptr, this->msg_len,
-                 this->fd, xsub.hash(),
-                 this->msg_len_ptr, this->msg_len_digits,
+                 this->sub_route, this->fd, h,
                  MD_STRING, 'p' );
   return this->sub_route.forward_msg( pub );
 }
@@ -528,78 +494,68 @@ EvNatsService::fwd_pub( void ) noexcept
 bool
 EvNatsService::on_msg( EvPublish &pub ) noexcept
 {
-  bool flow_good = true;
+  NatsStr       subj, sid, pre;
+  NatsLookup    look;
+  NatsSubStatus status;
+  bool          b, coll, flow_good = true;
 
   /* if client does not want to see the msgs it published */
   if ( ! this->echo && (uint32_t) this->fd == pub.src_route )
     return true;
-
   for ( uint8_t cnt = 0; cnt < pub.prefix_cnt; cnt++ ) {
-    NatsStr       xsid;
-    NatsLookup    look;
-    NatsSubStatus status;
-
-    if ( pub.subj_hash == pub.hash[ cnt ] ) {
-      NatsStr xsubj( pub.subject, pub.subject_len, pub.hash[ cnt ] );
-      status = this->map.lookup_publish( xsubj, look );
-      if ( status != NATS_NOT_FOUND ) {
-        for ( ; look.iter.get( xsid ); look.iter.incr() ) {
-          flow_good &= this->fwd_msg( pub, xsid.str, xsid.len );
-        }
+    uint32_t h = pub.hash[ cnt ];
+    if ( pub.subj_hash == h ) {
+      subj.set( pub.subject, pub.subject_len, h );
+      status = this->map.lookup_publish( subj, look );
+      for ( b = look.rt->first_sid( sid ); b; b = look.rt->next_sid( sid ) ) {
+        flow_good &= this->fwd_msg( pub, sid.str, sid.len );
       }
       if ( status == NATS_EXPIRED ) {
-        uint32_t h = pub.subj_hash;
-        if ( this->map.expire_publish( xsubj, look ) == NATS_EXPIRED ) {
-          uint32_t rcnt = 0;
-          /* check for duplicate hashes */
-          if ( this->map.sub_map.find_by_hash( h ) == NULL )
-            rcnt = this->sub_route.del_sub_route( h, this->fd );
-          this->sub_route.notify_unsub( h, xsubj.str, xsubj.len,
-                                   this->fd, rcnt, 'N' );
+        status = this->map.expired( look, coll );
+        if ( status == NATS_EXPIRED ) {
+          NotifySub nsub( subj.str, subj.len, h, this->fd, coll, 'N' );
+          this->sub_route.del_sub( nsub );
+          this->map.unsub_remove( look );
         }
       }
     }
     else {
-      NatsWildRec * rt = NULL;
-      RouteLoc      loc;
-      uint32_t      h  = pub.hash[ cnt ];
-      rt = this->map.wild_map.find_by_hash( h, loc );
+      pre.set( pub.subject, pub.prefix[ cnt ], h );
+      subj.set( pub.subject, pub.subject_len );
+      status = this->map.lookup_pattern( pre, subj, look );
       for (;;) {
-        if ( rt == NULL )
+        if ( status == NATS_NOT_FOUND )
           break;
-        if ( pcre2_match( rt->re, (const uint8_t *) pub.subject,
-                          pub.subject_len, 0, 0, rt->md, 0 ) == 1 ) {
-          NatsStr xsubj( rt->value, rt->len, rt->subj_hash );
-          status = this->map.lookup_publish( xsubj, look );
-          if ( status != NATS_NOT_FOUND ) {
-            for ( ; look.iter.get( xsid ); look.iter.incr() ) {
-              flow_good &= this->fwd_msg( pub, xsid.str, xsid.len );
-            }
-          }
+        for ( b = look.match->first_sid( sid ); b;
+              b = look.match->next_sid( sid ) ) {
+          flow_good &= this->fwd_msg( pub, sid.str, sid.len );
+        }
+        if ( status == NATS_EXPIRED ) {
+          status = this->map.expired_pattern( look, coll );
           if ( status == NATS_EXPIRED ) {
-            if ( this->map.expire_publish( xsubj, look ) == NATS_EXPIRED )
-              this->rem_wild( xsubj );
+            PatternCvt cvt;
+            if ( cvt.convert_rv( subj.str, subj.len ) == 0 ) {
+              NotifyPattern npat( cvt, look.match->value, look.match->len, h,
+                                  this->fd, coll, 'N' );
+              this->sub_route.del_pat( npat );
+            }
+            this->map.unsub_remove( look );
+            break;
           }
         }
-        rt = this->map.wild_map.find_next_by_hash( h, loc );
+        status = this->map.lookup_next( subj, look );
       }
     }
   }
-#if 0
-  printf( "publish:\n" );
-  this->map.print();
-#endif
   return flow_good;
 }
 
 bool
 EvNatsService::hash_to_sub( uint32_t h,  char *key,  size_t &keylen ) noexcept
 {
-  NatsMapRec * rt;
-  if ( (rt = this->map.sub_map.find_by_hash( h )) != NULL ) {
-    NatsStr xsub;
-    xsub.read( rt->value );
-    ::memcpy( key, xsub.str, xsub.len );
+  NatsSubRoute * rt;
+  if ( (rt = this->map.sub_tab.find_by_hash( h )) != NULL ) {
+    ::memcpy( key, rt->value, rt->len );
     keylen = rt->len;
     return true;
   }
@@ -617,9 +573,7 @@ bool
 EvNatsService::fwd_msg( EvPublish &pub,  const void *sid,
                         size_t sid_len ) noexcept
 {
-  size_t msg_len_digits =
-           ( pub.msg_len_digits > 0 ? pub.msg_len_digits :
-             uint64_digits( pub.msg_len ) );
+  size_t msg_len_digits = uint64_digits( pub.msg_len );
   size_t len = 4 +                                  /* MSG */
                pub.subject_len + 1 +                /* <subject> */
                sid_len + 1 +                        /* <sid> */
@@ -637,13 +591,8 @@ EvNatsService::fwd_msg( EvPublish &pub,  const void *sid,
     p = concat_hdr( p, (const char *) pub.reply, pub.reply_len );
     *p++ = ' ';
   }
-  if ( pub.msg_len_digits == 0 ) {
-    uint64_to_string( pub.msg_len, p, msg_len_digits );
-    p = &p[ msg_len_digits ];
-  }
-  else {
-    p = concat_hdr( p, pub.msg_len_buf, msg_len_digits );
-  }
+  uint64_to_string( pub.msg_len, p, msg_len_digits );
+  p = &p[ msg_len_digits ];
 
   *p++ = '\r'; *p++ = '\n';
   ::memcpy( p, pub.msg, pub.msg_len );
@@ -656,43 +605,20 @@ EvNatsService::fwd_msg( EvPublish &pub,  const void *sid,
   return flow_good;
 }
 
-#if 0
-  if ( this->reply_len > 0 )
-    printf( "fwd [%.*s] [reply=%.*s] nbytes %ld\n",
-            (int) this->subject_len, this->subject,
-            (int) this->reply_len, this->reply, this->msg_len );
-  else
-    printf( "fwd [%.*s] nbytes %ld\n", (int) this->subject_len, this->subject,
-            this->msg_len );
-#endif
+void
+EvNatsService::release( void ) noexcept
+{
+  //printf( "nats release fd=%d\n", this->fd );
+  this->rem_all_sub();
+  this->map.release();
+  this->EvConnection::release_buffers();
+  this->poll.push_free_list( this );
+}
 
-#if 0
-static bool connect_parse_bool( const char *b ) { return *b == 't'; }
-static size_t connect_parse_string( const char *b, const char *e,  char *s,
-                                    size_t max_sz ) {
-  /* b = start of string, e = comma or bracket after end of string */
-  char * start = s;
-  if ( max_sz == 0 )
-    return 0;
-  if ( max_sz > 1 ) {
-    if ( *b++ == '\"' ) {
-      while ( e > b )
-        if ( *--e == '\"' )
-          break;
-      while ( b < e ) {
-        *s++ = *b++;
-        if ( --max_sz == 1 )
-          break;
-      }
-    }
-  }
-  *s++ = '\0';
-  return s - start;
+bool EvNatsService::timer_expire( uint64_t, uint64_t ) noexcept
+{
+  return false;
 }
-static int connect_parse_int( const char *b ) {
-  return ( *b >= '0' && *b <= '9' ) ? ( *b - '0' ) : 0;
-}
-#endif
 
 void
 EvNatsService::parse_connect( const char *buf,  size_t bufsz ) noexcept
@@ -780,17 +706,158 @@ EvNatsService::parse_connect( const char *buf,  size_t bufsz ) noexcept
   } while ( iter->next() == 0 );
 }
 
-void
-EvNatsService::release( void ) noexcept
+NatsWildMatch *
+NatsWildMatch::create( NatsStr &subj,  NatsStr &sid,
+                       kv::PatternCvt &cvt ) noexcept
 {
-  //printf( "nats release fd=%d\n", this->fd );
-  this->rem_all_sub();
-  this->map.release();
-  this->EvConnection::release_buffers();
-  this->poll.push_free_list( this );
+  pcre2_real_code_8       * re = NULL;
+  pcre2_real_match_data_8 * md = NULL;
+  size_t erroff;
+  int    error;
+  bool   pattern_success = false;
+  /* if prefix matches, no need for pcre2 */
+  if ( cvt.prefixlen + 1 == subj.len && subj.str[ cvt.prefixlen ] == '>' )
+    pattern_success = true;
+  else {
+    re = pcre2_compile( (uint8_t *) cvt.out, cvt.off, 0, &error,
+                        &erroff, 0 );
+    if ( re == NULL ) {
+      fprintf( stderr, "re failed\n" );
+    }
+    else {
+      md = pcre2_match_data_create_from_pattern( re, NULL );
+      if ( md == NULL )
+        fprintf( stderr, "md failed\n" );
+      else
+        pattern_success = true;
+    }
+  }
+  if ( pattern_success ) {
+    size_t sz = sizeof( NatsWildMatch ) + subj.len + sid.len + 2 - 2;
+    void * p  = ::malloc( sz );
+    if ( p != NULL )
+      return new ( p ) NatsWildMatch( subj, sid, re, md );
+  }
+  if ( md != NULL )
+    pcre2_match_data_free( md );
+  if ( re != NULL )
+    pcre2_code_free( re );
+  return NULL;
 }
 
-bool EvNatsService::timer_expire( uint64_t, uint64_t ) noexcept
+NatsWildMatch::~NatsWildMatch()
 {
-  return false;
+  if ( this->md != NULL )
+    pcre2_match_data_free( this->md );
+  if ( this->re != NULL )
+    pcre2_code_free( this->re );
 }
+
+NatsWildMatch *
+NatsWildMatch::resize_sid( NatsWildMatch *m,  NatsStr &sid ) noexcept
+{
+  size_t sz = (size_t) m->sid_off + (size_t) sid.len + 2;
+  if ( sz > 0xffffU )
+    return NULL;
+  void * p = ::realloc( (void *) m, sizeof( NatsWildMatch ) + sz - 2 );
+  if ( p == NULL )
+    return NULL;
+  m = (NatsWildMatch *) p;
+  m->len += sid.len + 2;
+  m->add_sid( sid );
+  return m;
+}
+
+bool
+NatsWildMatch::match( NatsStr &subj ) noexcept
+{
+  return ( pcre2_match( this->re, (const uint8_t *) subj.str,
+                        subj.len, 0, 0, this->md, 0 ) == 1 );
+}
+
+void
+SidEntry::print( void ) noexcept
+{
+  printf( "%.*s", this->len, this->value );
+  if ( this->max_msgs != 0 )
+    printf( "[cnt=%lu,max=%lu]", this->msg_cnt, this->max_msgs );
+  if ( this->pref_hash != 0 )
+    printf( "[pattern]" );
+  printf( "\n" );
+}
+
+void
+NatsSubData::print_sids( void ) noexcept
+{
+  NatsStr sid;
+  bool b;
+  printf( "[refs=%u][cnt=%lu]", this->refcnt, this->msg_cnt );
+  if ( this->max_msgs != 0 )
+    printf( "[max=%lu]", this->max_msgs );
+  printf( ":" );
+  for ( b = this->first_sid( sid ); b; b = this->next_sid( sid ) ) {
+    printf( " %.*s", sid.len, sid.str );
+  }
+  printf( "\n" );
+}
+
+void
+NatsSubRoute::print( void ) noexcept
+{
+  printf( "%.*s", this->len, this->value );
+  this->print_sids();
+}
+
+void
+NatsPatternRoute::print( void ) noexcept
+{
+  NatsWildMatch * w;
+  for ( w = this->list.hd; w; w = w->next ) {
+    w->print();
+    w->print_sids();
+  }
+}
+
+void
+NatsWildMatch::print( void ) noexcept
+{
+  printf( "%.*s", this->len, this->value );
+}
+
+void
+NatsSubMap::print( void ) noexcept
+{
+  RouteLoc           loc;
+  SidEntry         * s;
+  NatsSubRoute     * r;
+  NatsPatternRoute * p;
+
+  printf( "-- sids:\n" );
+  for ( s = this->sid_tab.first( loc ); s; s = this->sid_tab.next( loc ) ) {
+    s->print();
+  }
+  printf( "-- subs:\n" );
+  for ( r = this->sub_tab.first( loc ); r; r = this->sub_tab.next( loc ) ) {
+    r->print();
+  }
+  printf( "-- patterns:\n" );
+  for ( p = this->pat_tab.first( loc ); p; p = this->pat_tab.next( loc ) ) {
+    p->print();
+  }
+}
+
+const char *
+rai::natsmd::nats_status_str( NatsSubStatus status )
+{
+  switch ( status ) {
+    case NATS_OK          : return "nats_ok";
+    case NATS_IS_NEW      : return "nats_is_new";
+    case NATS_EXPIRED     : return "nats_expired";
+    case NATS_NOT_FOUND   : return "nats_not_found";
+    case NATS_EXISTS      : return "nats_exists";
+    case NATS_TOO_MANY    : return "nats_too_many";
+    case NATS_BAD_PATTERN : return "nats_bad_pattern";
+    default: return "??";
+  }
+}
+
