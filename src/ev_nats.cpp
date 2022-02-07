@@ -462,7 +462,7 @@ EvNatsService::rem_all_sub( void ) noexcept
   for ( r = this->map.sub_tab.first( loc ); r;
         r = this->map.sub_tab.next( loc ) ) {
     bool coll = this->map.sub_tab.rem_collision( r );
-    NotifySub nsub( r->value, r->len, r->hash, this->fd, coll, 'V' );
+    NotifySub nsub( r->value, r->len, r->hash, this->fd, coll, 'N' );
     this->sub_route.del_sub( nsub );
   }
   for ( p = this->map.pat_tab.first( loc ); p;
@@ -472,7 +472,7 @@ EvNatsService::rem_all_sub( void ) noexcept
       if ( cvt.convert_rv( m->value, m->len ) == 0 ) {
         bool coll = this->map.pat_tab.rem_collision( p, m );
         NotifyPattern npat( cvt, m->value, m->len, p->hash,
-                            this->fd, coll, 'V' );
+                            this->fd, coll, 'N' );
         this->sub_route.del_pat( npat );
       }
     }
