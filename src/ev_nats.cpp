@@ -28,7 +28,16 @@ using namespace kv;
 using namespace md;
 
 EvNatsListen::EvNatsListen( EvPoll &p ) noexcept
-  : EvTcpListen( p, "nats_listen", "nats_sock" ) {}
+  : EvTcpListen( p, "nats_listen", "nats_sock" ), sub_route( p.sub_route ) {}
+
+EvNatsListen::EvNatsListen( EvPoll &p,  RoutePublish &sr ) noexcept
+  : EvTcpListen( p, "nats_listen", "nats_sock" ), sub_route( sr ) {}
+
+int
+EvNatsListen::listen( const char *ip,  int port,  int opts ) noexcept
+{
+  return this->kv::EvTcpListen::listen( ip, port, opts, "nats_listen" );
+}
 
 /*
  * NATS protocol:
@@ -126,7 +135,8 @@ EvNatsListen::accept( void ) noexcept
     return false;
   }
   EvNatsService *c =
-    this->poll.get_free_list<EvNatsService>( this->accept_sock_type );
+    this->poll.get_free_list2<EvNatsService, EvNatsListen>(
+      this->accept_sock_type, *this );
   if ( c == NULL ) {
     perror( "accept: no memory" );
     ::close( sock );
@@ -436,7 +446,7 @@ EvNatsService::rem_sid( uint64_t max_msgs ) noexcept
   status = map.unsub( sid, max_msgs, look, coll );
   if ( status == NATS_EXPIRED ) {
     if ( look.rt != NULL ) {
-      NotifySub nsub( look.rt->value, look.rt->len, look.hash, this->fd,
+      NotifySub nsub( look.rt->value, look.rt->subj_len, look.hash, this->fd,
                       coll, 'N' );
       this->sub_route.del_sub( nsub );
     }
@@ -555,8 +565,8 @@ EvNatsService::hash_to_sub( uint32_t h,  char *key,  size_t &keylen ) noexcept
 {
   NatsSubRoute * rt;
   if ( (rt = this->map.sub_tab.find_by_hash( h )) != NULL ) {
-    ::memcpy( key, rt->value, rt->len );
-    keylen = rt->len;
+    ::memcpy( key, rt->value, rt->subj_len );
+    keylen = rt->subj_len;
     return true;
   }
   return false;

@@ -9,11 +9,13 @@ namespace natsmd {
 
 struct EvNatsListen : public kv::EvTcpListen {
   void * operator new( size_t, void *ptr ) { return ptr; }
+  kv::RoutePublish & sub_route;
+
+  EvNatsListen( kv::EvPoll &p,  kv::RoutePublish &sr ) noexcept;
   EvNatsListen( kv::EvPoll &p ) noexcept;
+
   virtual bool accept( void ) noexcept;
-  virtual int listen( const char *ip,  int port,  int opts ) noexcept {
-    return this->kv::EvTcpListen::listen( ip, port, opts, "nats_listen" );
-  }
+  virtual int listen( const char *ip,  int port,  int opts ) noexcept;
 };
 
 struct EvPrefetchQueue;
@@ -28,33 +30,33 @@ struct EvNatsService : public kv::EvConnection {
   kv::RoutePublish & sub_route;
   NatsSubMap map;
 
-  char     * msg_ptr;     /* ptr to the msg blob */
-  size_t     msg_len;     /* size of the current message blob */
-  NatsState  msg_state;   /* ascii hdr mode or binary blob mode */
-  bool       verbose,     /* whether +OK is sent */
-             pedantic,    /* whether subject is checked for validity */
-             tls_require, /* whether need TLS layer */
-             echo;        /* whether to forward pubs to subs owned by client
+  char    * msg_ptr;     /* ptr to the msg blob */
+  size_t    msg_len;     /* size of the current message blob */
+  NatsState msg_state;   /* ascii hdr mode or binary blob mode */
+  bool      verbose,     /* whether +OK is sent */
+            pedantic,    /* whether subject is checked for validity */
+            tls_require, /* whether need TLS layer */
+            echo;        /* whether to forward pubs to subs owned by client
                              (eg. multicast loopback) */
-  char     * subject;     /* either pub or sub subject w/opt reply: */
-  size_t     subject_len; /* PUB <subject> <reply> */
-  char     * reply;       /* SUB <subject> <sid> */
-  size_t     reply_len;   /* len of reply */
-  char     * sid;         /* <sid> of SUB */
-  size_t     sid_len;     /* len of sid */
-  size_t     tmp_size;       /* amount of buffer[] free */
-  char       buffer[ 1024 ]; /* ptrs below index into this space */
+  char    * subject;     /* either pub or sub subject w/opt reply: */
+  size_t    subject_len; /* PUB <subject> <reply> */
+  char    * reply;       /* SUB <subject> <sid> */
+  size_t    reply_len;   /* len of reply */
+  char    * sid;         /* <sid> of SUB */
+  size_t    sid_len;     /* len of sid */
+  size_t    tmp_size;       /* amount of buffer[] free */
+  char      buffer[ 1024 ]; /* ptrs below index into this space */
 
-  int        protocol;    /* == 1 */
-  char     * name,
-           * lang,
-           * version,
-           * user,
-           * pass,
-           * auth_token;
+  int       protocol;    /* == 1 */
+  char    * name,
+          * lang,
+          * version,
+          * user,
+          * pass,
+          * auth_token;
 
-  EvNatsService( kv::EvPoll &p,  const uint8_t t )
-    : kv::EvConnection( p, t ), sub_route( p.sub_route ) {}
+  EvNatsService( kv::EvPoll &p,  const uint8_t t,  EvNatsListen &l )
+    : kv::EvConnection( p, t ), sub_route( l.sub_route ) {}
   void initialize_state( void ) {
     this->msg_ptr   = NULL;
     this->msg_len   = 0;
