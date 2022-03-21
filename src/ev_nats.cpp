@@ -16,7 +16,6 @@
 #include <raikv/key_hash.h>
 #include <raikv/util.h>
 #include <raikv/ev_publish.h>
-#include <raikv/kv_pubsub.h>
 #define PCRE2_CODE_UNIT_WIDTH 8
 #include <pcre2.h>
 #include <raikv/pattern_cvt.h>
@@ -36,7 +35,7 @@ EvNatsListen::EvNatsListen( EvPoll &p,  RoutePublish &sr ) noexcept
 int
 EvNatsListen::listen( const char *ip,  int port,  int opts ) noexcept
 {
-  return this->kv::EvTcpListen::listen( ip, port, opts, "nats_listen" );
+  return this->kv::EvTcpListen::listen2( ip, port, opts, "nats_listen" );
 }
 
 /*
@@ -123,34 +122,21 @@ init_server_info( uint64_t h1,  uint64_t h2,  uint16_t port )
 bool
 EvNatsListen::accept( void ) noexcept
 {
-  struct sockaddr_storage addr;
-  socklen_t addrlen = sizeof( addr );
-  int sock = ::accept( this->fd, (struct sockaddr *) &addr, &addrlen );
-  if ( sock < 0 ) {
-    if ( errno != EINTR ) {
-      if ( errno != EAGAIN )
-        perror( "accept" );
-      this->pop3( EV_READ, EV_READ_LO, EV_READ_HI );
-    }
-    return false;
-  }
   EvNatsService *c =
-    this->poll.get_free_list2<EvNatsService, EvNatsListen>(
+    this->poll.get_free_list<EvNatsService, EvNatsListen &>(
       this->accept_sock_type, *this );
-  if ( c == NULL ) {
-    perror( "accept: no memory" );
-    ::close( sock );
+
+  if ( c == NULL )
     return false;
-  }
-  EvTcpListen::set_sock_opts( this->poll, sock, this->sock_opts );
-  ::fcntl( sock, F_SETFL, O_NONBLOCK | ::fcntl( sock, F_GETFL ) );
+  if ( ! this->accept2( *c, "nats" ) )
+    return false;
 
   if ( ! is_server_info_init ) {
     uint16_t port = 42222;
     uint64_t h1, h2;
     struct sockaddr_storage myaddr;
     socklen_t myaddrlen = sizeof( myaddr );
-    if ( ::getsockname( sock, (sockaddr *) &myaddr, &myaddrlen ) == 0 ) {
+    if ( ::getsockname( c->fd, (sockaddr *) &myaddr, &myaddrlen ) == 0 ) {
       if ( myaddr.ss_family == AF_INET )
         port = ntohs( ((sockaddr_in *) &myaddr)->sin_port );
       else if ( myaddr.ss_family == AF_INET6 )
@@ -160,16 +146,9 @@ EvNatsListen::accept( void ) noexcept
     h2 = /*this->poll.map->hdr.seed[ 0 ].hash2;*/ 0;
     init_server_info( h1, h2, port );
   }
-  c->PeerData::init_peer( sock, (struct sockaddr *) &addr, "nats" );
   c->initialize_state();
-  c->idle_push( EV_WRITE_HI );
-  if ( this->poll.add_sock( c ) < 0 ) {
-    printf( "failed to add sock %d\n", sock );
-    ::close( sock );
-    this->poll.push_free_list( c );
-    return false;
-  }
   c->append_iov( nats_server_info, sizeof( nats_server_info ) - 1 );
+  c->idle_push( EV_WRITE_HI );
   return true;
 }
 
@@ -622,7 +601,6 @@ EvNatsService::release( void ) noexcept
   this->rem_all_sub();
   this->map.release();
   this->EvConnection::release_buffers();
-  this->poll.push_free_list( this );
 }
 
 bool EvNatsService::timer_expire( uint64_t, uint64_t ) noexcept

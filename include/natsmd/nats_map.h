@@ -336,8 +336,8 @@ struct NatsSubMap {
       if ( newlen > 0xffffU )
         rt = NULL;
       else
-        rt = this->sub_tab.resize( subj.hash(), subj.str, subj.len, newlen,
-                                   loc );
+        rt = this->sub_tab.resize( subj.hash(), subj.str, (size_t) subj.len,
+                                   newlen, loc );
       if ( rt == NULL ) {
         if ( loc.is_new )
           this->sub_tab.remove( loc );

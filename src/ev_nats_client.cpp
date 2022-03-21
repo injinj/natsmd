@@ -4,7 +4,6 @@
 #include <stdint.h>
 #include <natsmd/ev_nats_client.h>
 #include <raikv/ev_publish.h>
-#include <raikv/kv_pubsub.h>
 #include <raikv/bit_set.h>
 #include <raikv/pattern_cvt.h>
 #include <raimd/json_msg.h>
@@ -340,8 +339,6 @@ EvNatsClient::fwd_pub( void ) noexcept
 bool
 EvNatsClient::deduplicate_wildcard( EvPublish &pub ) noexcept
 {
-  KvPrefHash pf[ 64 ];
-  size_t     pfcnt = 0;
   BitIter64  bi( this->sub_route.pat_mask );
   uint32_t   hash,
              max_sid = 0;
@@ -355,7 +352,8 @@ EvNatsClient::deduplicate_wildcard( EvPublish &pub ) noexcept
       hash = this->sub_route.prefix_seed( bi.i );
       if ( bi.i > 0 )
         hash = kv_crc_c( this->subject, bi.i, hash );
-      NatsPrefix *pref = this->pat_tab.find( hash, this->subject, bi.i );
+      NatsPrefix *pref = this->pat_tab.find( hash, this->subject,
+                                             (size_t) bi.i );
       if ( pref != NULL ) {
         if ( this->sid[ 0 ] != '-' ) /* not a wildcard sid */
           return true; /* matches a wildcard, toss the subject publish */
@@ -363,15 +361,12 @@ EvNatsClient::deduplicate_wildcard( EvPublish &pub ) noexcept
           max_sid = pref->sid;
       }
       /* track the prefix hashes, it is used by poll.forward_msg() */
-      pf[ pfcnt ].pref = bi.i;
-      pf[ pfcnt ].set_hash( hash );
-      pfcnt++;
     } while ( bi.next() );
   }
   /* if no wildcard matches or the maximum sid matches, forward */
   if ( max_sid == 0 || (uint64_t) max_sid ==
                        string_to_uint64( &this->sid[ 1 ], this->sid_len - 1 ) )
-    return this->sub_route.forward_msg( pub, NULL, pfcnt, pf );
+    return this->sub_route.forward_msg( pub );
   /* toss the publish, only forward the maximum sid */
   return true;
 }
@@ -666,11 +661,11 @@ EvNatsClient::do_psub( uint32_t h,  const char *prefix,
   NatsPrefix * pat;
   if ( is_new ) {
     this->set_wildcard_match( w ); /* track first char of wildcards */
-    pat = this->pat_tab.insert( h, prefix, prefix_len );
+    pat = this->pat_tab.insert( h, prefix, (size_t) prefix_len );
     pat->sid = sid;
   }
   else {
-    pat = this->pat_tab.find( h, prefix, prefix_len );
+    pat = this->pat_tab.find( h, prefix, (size_t) prefix_len );
     if ( pat == NULL ) { /* should be there */
       fprintf( stderr, "pattern not found: %.*s\n", (int) prefix_len, prefix );
       return;
