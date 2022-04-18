@@ -2,16 +2,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-#include <ctype.h>
+#define __STDC_FORMAT_MACROS
+#include <inttypes.h>
+#ifndef _MSC_VER
 #include <unistd.h>
-#include <fcntl.h>
-#include <time.h>
-#include <errno.h>
 #include <sys/socket.h>
-#include <sys/stat.h>
-#include <netinet/tcp.h>
 #include <netdb.h>
 #include <arpa/inet.h>
+#else
+#include <raikv/win.h>
+#endif
 #include <natsmd/ev_nats.h>
 #include <raikv/key_hash.h>
 #include <raikv/util.h>
@@ -136,7 +136,16 @@ EvNatsListen::accept( void ) noexcept
     uint64_t h1, h2;
     struct sockaddr_storage myaddr;
     socklen_t myaddrlen = sizeof( myaddr );
-    if ( ::getsockname( c->fd, (sockaddr *) &myaddr, &myaddrlen ) == 0 ) {
+    int status;
+#ifndef _MSC_VER
+    status = ::getsockname( c->fd, (sockaddr *) &myaddr, &myaddrlen );
+#else
+    SOCKET sock;
+    status = ::wp_get_socket( c->fd, &sock );
+    if ( status == 0 )
+      status = ::getsockname( sock, (sockaddr *) &myaddr, &myaddrlen );
+#endif
+    if ( status == 0 ) {
       if ( myaddr.ss_family == AF_INET )
         port = ntohs( ((sockaddr_in *) &myaddr)->sin_port );
       else if ( myaddr.ss_family == AF_INET6 )
@@ -314,7 +323,7 @@ EvNatsService::process( void ) noexcept
       if ( ( fl & DO_ERR ) != 0 )
         this->append( err, sizeof( err ) - 1 );
       if ( ( fl & ( FLOW_BACKPRESSURE | HAS_PING ) ) != 0 ) {
-        this->off += used;
+        this->off += (uint32_t) used;
         if ( this->pending() > 0 )
           this->push( EV_WRITE_HI );
         if ( this->test( EV_READ ) )
@@ -323,7 +332,7 @@ EvNatsService::process( void ) noexcept
       }
       fl = 0;
     }
-    this->off += used;
+    this->off += (uint32_t) used;
     if ( used == 0 || ( fl & NEED_MORE ) != 0 )
       goto break_loop;
   }
@@ -768,7 +777,7 @@ SidEntry::print( void ) noexcept
 {
   printf( "%.*s", this->len, this->value );
   if ( this->max_msgs != 0 )
-    printf( "[cnt=%lu,max=%lu]", this->msg_cnt, this->max_msgs );
+    printf( "[cnt=%" PRIu64 ",max=%" PRIu64 "]", this->msg_cnt, this->max_msgs);
   if ( this->pref_hash != 0 )
     printf( "[pattern]" );
   printf( "\n" );
@@ -779,9 +788,9 @@ NatsSubData::print_sids( void ) noexcept
 {
   NatsStr sid;
   bool b;
-  printf( "[refs=%u][cnt=%lu]", this->refcnt, this->msg_cnt );
+  printf( "[refs=%u][cnt=%" PRIu64 "]", this->refcnt, this->msg_cnt );
   if ( this->max_msgs != 0 )
-    printf( "[max=%lu]", this->max_msgs );
+    printf( "[max=%" PRIu64 "]", this->max_msgs );
   printf( ":" );
   for ( b = this->first_sid( sid ); b; b = this->next_sid( sid ) ) {
     printf( " %.*s", sid.len, sid.str );

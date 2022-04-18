@@ -215,7 +215,7 @@ EvNatsClient::process( void ) noexcept
       }
       /* write buffer immediately when ping or publish back pressure */
       if ( ( fl & ( FLOW_BACKPRESSURE | HAS_PING ) ) != 0 ) {
-        this->off += used;
+        this->off += (uint32_t) used;
         if ( this->pending() > 0 )
           this->push( EV_WRITE_HI );
         if ( this->test( EV_READ ) )
@@ -225,7 +225,7 @@ EvNatsClient::process( void ) noexcept
       fl = 0;
     }
     /* consume used */
-    this->off += used;
+    this->off += (uint32_t) used;
     if ( used == 0 || ( fl & NEED_MORE ) != 0 )
       goto break_loop;
   }
@@ -418,7 +418,7 @@ EvNatsClient::merge_fragment( NatsTrailer &trail,  const void *msg,
   uint8_t * frag_msg  = (uint8_t *) p->msg_ptr();
   size_t    frag_size = msg_len - sizeof( NatsTrailer );
   ::memcpy( &frag_msg[ trail.off ], msg, frag_size );
-  p->off += frag_size;
+  p->off += (uint32_t) frag_size;
   /* if all fragments are recvd */
   if ( p->off == p->msg_len ) {
     this->frags_pending.pop( p );
@@ -514,7 +514,8 @@ EvNatsClient::on_msg( EvPublish &pub ) noexcept
     bool        is_last   = false;
 
     msg_len_digits = uint64_digits( msg_len );
-    for ( trail.off = 0; trail.off < pub.msg_len; trail.off += frag_size ) {
+    for ( trail.off = 0; trail.off < pub.msg_len;
+          trail.off += (uint32_t) frag_size ) {
       if ( trail.off + frag_size > pub.msg_len ) {
         frag_size      = pub.msg_len - trail.off;
         msg_len        = frag_size + sizeof( NatsTrailer );
@@ -599,7 +600,7 @@ EvNatsClient::do_sub( uint32_t h,  const char *sub,  size_t sublen ) noexcept
 {
   bool     is_new;
   uint32_t sid        = this->create_sid( h, sub, sublen, is_new ),
-           sid_digits = uint32_digits( sid );
+           sid_digits = (uint32_t) uint32_digits( sid );
   size_t   len = 4 +             /* SUB */
                  sublen + 1 +    /* <subject> */
                  sid_digits + 2; /* <sid>\r\n */
@@ -630,7 +631,7 @@ EvNatsClient::on_unsub( NotifySub &sub ) noexcept
     return;
   uint32_t sid        = this->remove_sid( sub.subj_hash, sub.subject,
                                           sub.subject_len ),
-           sid_digits = uint32_digits( sid );
+           sid_digits = (uint32_t) uint32_digits( sid );
   if ( sid != 0 ) {
     size_t   len = 6 +             /* UNSUB */
                    sid_digits + 2; /* <sid>\r\n */
@@ -654,7 +655,7 @@ EvNatsClient::do_psub( uint32_t h,  const char *prefix,
   uint8_t w = ( prefix_len == 0 ? 0 : prefix[ 0 ] );
   bool         is_new;
   uint32_t     sid        = this->create_sid( h, prefix, prefix_len, is_new ),
-               sid_digits = uint32_digits( sid );
+               sid_digits = (uint32_t) uint32_digits( sid );
   size_t       len        = 4 +                 /* SUB */
                             prefix_len + 2 +    /* <subject> + > */
                             1 + sid_digits + 2; /* -<sid>\r\n */
@@ -707,7 +708,7 @@ EvNatsClient::on_psub( NotifyPattern &pat ) noexcept
     fwd = true;
   if ( ! fwd )
     return;
-  this->do_psub( pat.prefix_hash, prefix, prefix_len );
+  this->do_psub( pat.prefix_hash, prefix, (uint8_t) prefix_len );
   this->idle_push( EV_WRITE );
 }
 /* forward pattern unsubscribe: UNSUB -sid */
@@ -732,7 +733,7 @@ EvNatsClient::on_punsub( NotifyPattern &pat ) noexcept
   if ( ! fwd )
     return;
   uint32_t sid        = this->remove_sid( pat.prefix_hash, prefix, prefix_len ),
-           sid_digits = uint32_digits( sid );
+           sid_digits = (uint32_t) uint32_digits( sid );
   if ( sid != 0 ) {
     uint8_t w = ( prefix_len == 0 ? 0 : prefix[ 0 ] );
     this->clear_wildcard_match( w );
@@ -765,7 +766,7 @@ EvNatsClient::on_reassert( uint32_t /*fd*/,  RouteVec<RouteSub> &sub_db,
     this->do_sub( sub->hash, sub->value, sub->len );
   }
   for ( sub = pat_db.first( loc ); sub != NULL; sub = pat_db.next( loc ) ) {
-    this->do_psub( sub->hash, sub->value, sub->len );
+    this->do_psub( sub->hash, sub->value, (uint8_t) sub->len );
   }
   this->idle_push( EV_WRITE );
 }

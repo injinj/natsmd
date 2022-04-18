@@ -5,6 +5,7 @@
 #define PCRE2_CODE_UNIT_WIDTH 8
 #include <pcre2.h>
 #include <raikv/key_hash.h>
+#include <raikv/util.h>
 #include <natsmd/nats_map.h>
 
 using namespace rai;

@@ -31,11 +31,11 @@ struct NatsStr {
   uint16_t     len; /* array len of str[] */
   uint32_t     h;   /* cached hash value */
 
-  NatsStr( const char *s = NULL,  uint16_t l = 0,  uint32_t ha = 0 )
-    : str( s ), len( l ), h( ha ) {}
+  NatsStr( const char *s = NULL,  size_t l = 0,  uint32_t ha = 0 )
+    : str( s ), len( (uint16_t) l ), h( ha ) {}
 
-  void set( const char *s = NULL,  uint16_t l = 0,  uint32_t ha = 0 ) {
-    this->str = s; this->len = l; this->h = ha;
+  void set( const char *s = NULL,  size_t l = 0,  uint32_t ha = 0 ) {
+    this->str = s; this->len = (uint16_t) l; this->h = ha;
   }
   bool ref( const char *p,  const char *end ) {
     if ( &p[ 2 ] > end )
@@ -66,22 +66,32 @@ struct NatsStr {
       if ( this->str[ this->len - 2 ] == '.' ) /* is last char */
         return true;
     }
-    /* look for *. */
-    const char *p = (const char *) ::memmem( this->str, this->len, "*.", 2 );
-    if ( p != NULL ) {
-      if ( p == this->str || p[ -1 ] == '.' )
+    /* look for ^*. .*. or .*$ */
+    const char * p = (const char *) ::memchr( this->str, '*', this->len );
+    while ( p != NULL ) {
+      if ( ( p == this->str || p[ -1 ] == '.' ) &&
+           ( p == &this->str[ this->len - 1 ] || p[ 1 ] == '.' ) ) {
         return true;
+      }
+      p = (const char *)
+          ::memchr( p+1, '*', &this->str[ this->len ] - (p+1) );
     }
     return false;
   }
   bool is_valid( void ) {
     if ( this->len == 0 )
       return false;
-    /* if first is . or last is . */
-    if ( this->str[ 0 ] == '.' || this->str[ this->len - 1 ] == '.' )
-      return false;
-    /* if any empty segments */
-    return ::memmem( this->str, this->len, "..", 2 ) == NULL;
+    const char * p = (const char *) ::memchr( this->str, '.', this->len );
+    /* look for ^. .. or .$ */
+    while ( p != NULL ) {
+      if ( p == this->str || p[ -1 ] == '.' ||
+           p == &this->str[ this->len - 1 ] || p[ 1 ] == '.' ) {
+        return false;
+      }
+      p = (const char *)
+          ::memchr( p+1, '.', &this->str[ this->len ] - (p+1) );
+    }
+    return true;
   }
 };
 

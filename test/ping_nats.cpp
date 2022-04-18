@@ -1,16 +1,15 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#ifndef _MSC_VER
 #include <unistd.h>
-#include <sys/epoll.h>
-#include <sys/socket.h>
-#include <arpa/inet.h>
-#include <sys/time.h>
-#include <time.h>
-#include <signal.h>
+#else
+#include <raikv/win.h>
+#endif
 #include <hdr_histogram.h>
 #include <raikv/ev_net.h>
 #include <raikv/ev_tcp.h>
+#include <raikv/util.h>
 
 using namespace rai;
 using namespace kv;
@@ -139,25 +138,16 @@ get_arg( int argc, char *argv[], int b, const char *f, const char *def )
   return def; /* default value */
 }
 
-bool quit;
-
-void
-sigint_handler( int )
-{
-  quit = true;
-}
-
-uint64_t
-current_time_nsecs( void )
-{
-  struct timespec ts;
-  clock_gettime( CLOCK_MONOTONIC, &ts );
-  return (uint64_t) ts.tv_sec * 1000000000 + ts.tv_nsec;
-}
+#ifndef _MSC_VER
+#define get_process_id getpid
+#else
+#define get_process_id GetProcessId
+#endif
 
 int
 main( int argc, char **argv )
 {
+  SignalHandler sighndl;
   const char * ne = get_arg( argc, argv, 1, "-n", "127.0.0.1" ),
              * po = get_arg( argc, argv, 1, "-p", "4222" ),
              * us = get_arg( argc, argv, 1, "-u", "chris" ),
@@ -189,8 +179,9 @@ main( int argc, char **argv )
       count = 1;
   }
 
-  EvPoll   poll;
+  EvPoll poll;
   poll.init( 5, false );
+  sighndl.install();
   SockData data( poll );
   if ( EvTcpConnection::connect( data, ne, atoi( po ),
                                  DEFAULT_TCP_CONNECT_OPTS )!=0){
@@ -198,19 +189,18 @@ main( int argc, char **argv )
     return 1;
   }
 
-  signal( SIGINT, sigint_handler );
   struct hdr_histogram * histogram = NULL;
   uint64_t ping_ival = 1000000000,
-           last      = current_time_nsecs(),
+           last      = current_monotonic_time_ns(),
            next      = last + ping_ival,
            seqno     = 0,
-           my_id     = getpid(),
+           my_id     = get_process_id(),
            src, stamp, num, delta, now;
   /*int      spin_cnt = 0;*/
   bool     reflect  = ( re != NULL )/*,
            busywait = ( bu != NULL )*/,
            connected = false;
-  while ( ! quit && ! connected ) {
+  while ( ! sighndl.signaled && ! connected ) {
     char msg[ 1024 ];
     size_t msglen = sizeof( msg );
     if ( data.recv( msg, msglen ) ) {
@@ -232,8 +222,8 @@ main( int argc, char **argv )
     }
   }
   if ( ! connected )
-    quit = true;
-  if ( ! quit ) {
+    poll.quit = 1;
+  if ( ! poll.quit ) {
     static char sub_pong[] = "SUB PONG 1\r\n",
                 sub_ping[] = "SUB PING 1\r\n";
     if ( ! reflect )
@@ -244,11 +234,11 @@ main( int argc, char **argv )
 
   if ( ! reflect )
     hdr_init( 1, 1000000, 3, &histogram );
-  while ( ! quit ) {
+  while ( ! poll.quit ) {
     if ( data.recv_ping( src, stamp, num ) ) {
       /*spin_cnt = 0;*/
       if ( src == my_id ) {
-        now  = current_time_nsecs();
+        now  = current_monotonic_time_ns();
         next = now; /* send the next immediately */
         hdr_record_value( histogram, now - stamp );
         if ( count > 0 && --count == 0 ) {
@@ -258,7 +248,7 @@ main( int argc, char **argv )
              warm  = 0;
           }
           else {
-            quit = true;
+            poll.quit = 1;
           }
         }
       }
@@ -268,7 +258,7 @@ main( int argc, char **argv )
     }
     /* activly send pings every second until response */
     else if ( ! reflect ) {
-      now = current_time_nsecs();
+      now = current_monotonic_time_ns();
       if ( now >= next ) {
         if ( data.send_ping( reflect, my_id, now, seqno ) ) {
           seqno++;
@@ -284,6 +274,8 @@ main( int argc, char **argv )
           data.timeout_usecs = delta / 1000;
       }
     }
+    if ( sighndl.signaled )
+      poll.quit = 1;
   }
   /*data.close();*/
   if ( ! reflect )
