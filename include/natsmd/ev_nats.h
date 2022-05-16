@@ -4,6 +4,9 @@
 #include <raikv/ev_tcp.h>
 #include <natsmd/nats_map.h>
 
+extern "C" {
+const char *natsmd_get_version( void );
+}
 namespace rai {
 namespace natsmd {
 

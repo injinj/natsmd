@@ -18,9 +18,13 @@ libd      := $(build_dir)/lib64
 objd      := $(build_dir)/obj
 dependd   := $(build_dir)/dep
 
+default_cflags := -ggdb -O3
 # use 'make port_extra=-g' for debug build
 ifeq (-g,$(findstring -g,$(port_extra)))
-  DEBUG = true
+  default_cflags := -ggdb
+endif
+ifeq (-a,$(findstring -a,$(port_extra)))
+  default_cflags := -fsanitize=address -ggdb -O3
 endif
 
 CC          ?= gcc
@@ -40,11 +44,6 @@ gcc_wflags  := -Wall -Wextra -Werror
 fpicflags   := -fPIC
 soflag      := -shared
 
-ifdef DEBUG
-default_cflags := -ggdb
-else
-default_cflags := -ggdb -O3 -Ofast
-endif
 # rpmbuild uses RPM_OPT_FLAGS
 CFLAGS := $(default_cflags)
 #RPM_OPT_FLAGS ?= $(default_cflags)
@@ -184,6 +183,7 @@ all_dlls    :=
 all_depends :=
 gen_files   :=
 
+ev_nats_defines := -DNATSMD_VER=$(ver_build)
 libnatsmd_files := ev_nats ev_nats_client
 libnatsmd_cfile := $(addprefix src/, $(addsuffix .cpp, $(libnatsmd_files)))
 libnatsmd_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(libnatsmd_files)))

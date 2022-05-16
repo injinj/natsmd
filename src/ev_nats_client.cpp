@@ -551,9 +551,7 @@ EvNatsClient::on_msg( EvPublish &pub ) noexcept
       this->sz += len;
     }
   }
-  bool flow = ( this->pending() <= this->send_highwater );
-  this->idle_push( flow ? EV_WRITE : EV_WRITE_HI );
-  return flow;
+  return this->idle_push_write();
 }
 /* hash subject to insert sid into sid_ht,
  * if collision, use hash64 in sid_collsion_ht */
@@ -621,7 +619,7 @@ void
 EvNatsClient::on_sub( NotifySub &sub ) noexcept
 {
   this->do_sub( sub.subj_hash, sub.subject, sub.subject_len );
-  this->idle_push( EV_WRITE );
+  this->idle_push_write();
 }
 /* forward unsubscribe subject: UNSUB sid */
 void
@@ -644,7 +642,7 @@ EvNatsClient::on_unsub( NotifySub &sub ) noexcept
     if ( nats_client_sub_verbose )
       printf( "%.*s", (int) len, s );
     this->sz += len;
-    this->idle_push( EV_WRITE );
+    this->idle_push_write();
   }
 }
 /* forward pattern subscribe: SUB wildcard -sid */
@@ -709,7 +707,7 @@ EvNatsClient::on_psub( NotifyPattern &pat ) noexcept
   if ( ! fwd )
     return;
   this->do_psub( pat.prefix_hash, prefix, (uint8_t) prefix_len );
-  this->idle_push( EV_WRITE );
+  this->idle_push_write();
 }
 /* forward pattern unsubscribe: UNSUB -sid */
 void
@@ -751,7 +749,7 @@ EvNatsClient::on_punsub( NotifyPattern &pat ) noexcept
     this->sz += len;
     if ( nats_client_sub_verbose )
       printf( "%.*s", (int) len, s );
-    this->idle_push( EV_WRITE );
+    this->idle_push_write();
   }
 }
 
@@ -768,7 +766,7 @@ EvNatsClient::on_reassert( uint32_t /*fd*/,  RouteVec<RouteSub> &sub_db,
   for ( sub = pat_db.first( loc ); sub != NULL; sub = pat_db.next( loc ) ) {
     this->do_psub( sub->hash, sub->value, (uint8_t) sub->len );
   }
-  this->idle_push( EV_WRITE );
+  this->idle_push_write();
 }
 
 /* parse json formatted message:

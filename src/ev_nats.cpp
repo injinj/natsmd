@@ -21,6 +21,13 @@
 #include <raikv/pattern_cvt.h>
 #include <raimd/json_msg.h>
 
+extern "C" {
+const char *
+natsmd_get_version( void )
+{
+  return kv_stringify( NATSMD_VER );
+}
+}
 using namespace rai;
 using namespace natsmd;
 using namespace kv;
@@ -598,9 +605,7 @@ EvNatsService::fwd_msg( EvPublish &pub,  const void *sid,
   *p++ = '\r'; *p++ = '\n';
 
   this->sz += len;
-  bool flow_good = ( this->pending() <= this->send_highwater );
-  this->idle_push( flow_good ? EV_WRITE : EV_WRITE_HI );
-  return flow_good;
+  return this->idle_push_write();
 }
 
 void
