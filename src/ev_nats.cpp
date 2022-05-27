@@ -126,7 +126,7 @@ init_server_info( uint64_t h1,  uint64_t h2,  uint16_t port )
   is_server_info_init = true;
 }
 
-bool
+EvSocket *
 EvNatsListen::accept( void ) noexcept
 {
   EvNatsService *c =
@@ -134,9 +134,9 @@ EvNatsListen::accept( void ) noexcept
       this->accept_sock_type, *this );
 
   if ( c == NULL )
-    return false;
+    return NULL;
   if ( ! this->accept2( *c, "nats" ) )
-    return false;
+    return NULL;
 
   if ( ! is_server_info_init ) {
     uint16_t port = 42222;
@@ -165,7 +165,7 @@ EvNatsListen::accept( void ) noexcept
   c->initialize_state();
   c->append_iov( nats_server_info, sizeof( nats_server_info ) - 1 );
   c->idle_push( EV_WRITE_HI );
-  return true;
+  return c;
 }
 
 void

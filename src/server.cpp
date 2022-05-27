@@ -45,7 +45,7 @@ struct Loop : public MainLoop<Args> {
 int
 main( int argc, const char *argv[] )
 {
-  EvShm shm;
+  EvShm shm( "natsmd_server" );
   Args  r;
 
   r.no_threads   = true;

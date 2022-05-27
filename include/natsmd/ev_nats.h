@@ -17,7 +17,7 @@ struct EvNatsListen : public kv::EvTcpListen {
   EvNatsListen( kv::EvPoll &p,  kv::RoutePublish &sr ) noexcept;
   EvNatsListen( kv::EvPoll &p ) noexcept;
 
-  virtual bool accept( void ) noexcept;
+  virtual EvSocket *accept( void ) noexcept;
   virtual int listen( const char *ip,  int port,  int opts ) noexcept;
 };
 
