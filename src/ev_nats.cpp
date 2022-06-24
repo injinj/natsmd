@@ -42,7 +42,8 @@ EvNatsListen::EvNatsListen( EvPoll &p,  RoutePublish &sr ) noexcept
 int
 EvNatsListen::listen( const char *ip,  int port,  int opts ) noexcept
 {
-  return this->kv::EvTcpListen::listen2( ip, port, opts, "nats_listen" );
+  return this->kv::EvTcpListen::listen2( ip, port, opts, "nats_listen",
+                                         this->sub_route.route_id );
 }
 
 /*
