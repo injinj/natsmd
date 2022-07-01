@@ -216,8 +216,9 @@ struct EvNatsClient : public kv::EvConnection, public kv::RouteNotify {
   void save_error( const char *buf,  size_t len ) noexcept;
 
   /* EvSocket */
-  virtual void process( void ) noexcept final; /* decode read buffer */
-  virtual void release( void ) noexcept final; /* after shutdown release mem */
+  virtual void process( void ) noexcept; /* decode read buffer */
+  virtual void process_close( void ) noexcept;
+  virtual void release( void ) noexcept; /* after shutdown release mem */
   virtual bool on_msg( kv::EvPublish &pub ) noexcept; /* fwd to NATS network */
 
   /* track the sid of subjects for UNSUB */

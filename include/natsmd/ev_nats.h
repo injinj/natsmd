@@ -93,13 +93,14 @@ struct EvNatsService : public kv::EvConnection {
   bool fwd_msg( kv::EvPublish &pub,  const void *sid,  size_t sid_len ) noexcept;
   void parse_connect( const char *buf,  size_t sz ) noexcept;
   /* EvSocket */
-  virtual void process( void ) noexcept final;
-  virtual void release( void ) noexcept final;
-  virtual bool timer_expire( uint64_t tid, uint64_t eid ) noexcept final;
-  virtual bool hash_to_sub( uint32_t h, char *k, size_t &klen ) noexcept final;
-  virtual bool on_msg( kv::EvPublish &pub ) noexcept final;
-  virtual uint8_t is_subscribed( const kv::NotifySub &sub ) noexcept final;
-  virtual uint8_t is_psubscribed( const kv::NotifyPattern &pat ) noexcept final;
+  virtual void process( void ) noexcept;
+  virtual void process_close( void ) noexcept;
+  virtual void release( void ) noexcept;
+  virtual bool timer_expire( uint64_t tid, uint64_t eid ) noexcept;
+  virtual bool hash_to_sub( uint32_t h, char *k, size_t &klen ) noexcept;
+  virtual bool on_msg( kv::EvPublish &pub ) noexcept;
+  virtual uint8_t is_subscribed( const kv::NotifySub &sub ) noexcept;
+  virtual uint8_t is_psubscribed( const kv::NotifyPattern &pat ) noexcept;
 };
 
 /* presumes little endian, 0xdf masks out 0x20 for toupper() */

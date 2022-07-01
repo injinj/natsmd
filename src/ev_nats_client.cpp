@@ -426,6 +426,13 @@ EvNatsClient::merge_fragment( NatsTrailer &trail,  const void *msg,
   }
   return NULL;
 }
+void
+EvNatsClient::process_close( void ) noexcept
+{
+  this->client_stats( this->sub_route.peer_stats );
+  this->EvSocket::process_close();
+}
+
 /* clear fragmens on shutdown */
 void
 EvNatsClient::release_fragments( void ) noexcept

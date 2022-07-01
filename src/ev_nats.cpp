@@ -610,6 +610,13 @@ EvNatsService::fwd_msg( EvPublish &pub,  const void *sid,
 }
 
 void
+EvNatsService::process_close( void ) noexcept
+{
+  this->client_stats( this->sub_route.peer_stats );
+  this->EvSocket::process_close();
+}
+
+void
 EvNatsService::release( void ) noexcept
 {
   //printf( "nats release fd=%d\n", this->fd );
