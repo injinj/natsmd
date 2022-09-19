@@ -163,7 +163,7 @@ EvNatsListen::accept( void ) noexcept
     h2 = /*this->poll.map->hdr.seed[ 0 ].hash2;*/ 0;
     init_server_info( h1, h2, port );
   }
-  c->initialize_state();
+  c->initialize_state( NULL, 0 );
   c->append_iov( nats_server_info, sizeof( nats_server_info ) - 1 );
   c->idle_push( EV_WRITE_HI );
   return c;
@@ -398,8 +398,20 @@ EvNatsService::is_psubscribed( const NotifyPattern &pat ) noexcept
 void
 EvNatsService::add_sub( void ) noexcept
 {
+  const char * sub     = this->subject;
+  size_t       sublen  = this->subject_len,
+               preflen = this->prefix_len;
+
+  if ( preflen > 0 ) {
+    char *tmp = this->alloc_temp( sublen + preflen );
+    ::memcpy( tmp, this->prefix, preflen );
+    ::memcpy( &tmp[ preflen ], sub, sublen );
+    sub     = tmp;
+    sublen += preflen;
+  }
+
   NatsStr sid( this->sid, this->sid_len );
-  NatsStr subj( this->subject, this->subject_len );
+  NatsStr subj( sub, sublen );
   bool    coll = false;
   NatsSubStatus status;
 
@@ -448,9 +460,9 @@ EvNatsService::rem_sid( uint64_t max_msgs ) noexcept
     }
     else {
       PatternCvt cvt;
-      if ( cvt.convert_rv( look.match->value, look.match->len ) == 0 ) {
-        NotifyPattern npat( cvt, look.match->value, look.match->len, look.hash,
-                            this->fd, coll, 'N' );
+      if ( cvt.convert_rv( look.match->value, look.match->subj_len ) == 0 ) {
+        NotifyPattern npat( cvt, look.match->value, look.match->subj_len,
+                            look.hash, this->fd, coll, 'N' );
         this->sub_route.del_pat( npat );
       }
     }
@@ -468,16 +480,16 @@ EvNatsService::rem_all_sub( void ) noexcept
   for ( r = this->map.sub_tab.first( loc ); r;
         r = this->map.sub_tab.next( loc ) ) {
     bool coll = this->map.sub_tab.rem_collision( r );
-    NotifySub nsub( r->value, r->len, r->hash, this->fd, coll, 'N' );
+    NotifySub nsub( r->value, r->subj_len, r->hash, this->fd, coll, 'N' );
     this->sub_route.del_sub( nsub );
   }
   for ( p = this->map.pat_tab.first( loc ); p;
         p = this->map.pat_tab.next( loc ) ) {
     for ( NatsWildMatch *m = p->list.hd; m != NULL; m = m->next ) {
       PatternCvt cvt;
-      if ( cvt.convert_rv( m->value, m->len ) == 0 ) {
+      if ( cvt.convert_rv( m->value, m->subj_len ) == 0 ) {
         bool coll = this->map.pat_tab.rem_collision( p, m );
-        NotifyPattern npat( cvt, m->value, m->len, p->hash,
+        NotifyPattern npat( cvt, m->value, m->subj_len, p->hash,
                             this->fd, coll, 'N' );
         this->sub_route.del_pat( npat );
       }
@@ -488,9 +500,27 @@ EvNatsService::rem_all_sub( void ) noexcept
 bool
 EvNatsService::fwd_pub( void ) noexcept
 {
-  uint32_t  h = kv_crc_c( this->subject, this->subject_len, 0 );
-  EvPublish pub( this->subject, this->subject_len,
-                 this->reply, this->reply_len,
+  size_t    preflen = this->prefix_len;
+  const char  * sub = this->subject,
+              * rep = this->reply;
+  size_t     sublen = this->subject_len,
+             replen = this->reply_len;
+  if ( preflen > 0 ) {
+    char * tmp = this->alloc_temp( sublen + preflen );
+    ::memcpy( tmp, this->prefix, preflen );
+    ::memcpy( &tmp[ preflen ], sub, sublen );
+    sub     = tmp;
+    sublen += preflen;
+    if ( replen > 0 ) {
+      tmp = this->alloc_temp( replen + preflen );
+      ::memcpy( tmp, this->prefix, preflen );
+      ::memcpy( &tmp[ preflen ], rep, replen );
+      rep     = tmp;
+      replen += preflen;
+    }
+  }
+  uint32_t  h = kv_crc_c( sub, sublen, 0 );
+  EvPublish pub( sub, sublen, rep, replen,
                  this->msg_ptr, this->msg_len,
                  this->sub_route, this->fd, h,
                  MD_STRING, 'p' );
@@ -540,9 +570,10 @@ EvNatsService::on_msg( EvPublish &pub ) noexcept
           status = this->map.expired_pattern( look, coll );
           if ( status == NATS_EXPIRED ) {
             PatternCvt cvt;
-            if ( cvt.convert_rv( subj.str, subj.len ) == 0 ) {
-              NotifyPattern npat( cvt, look.match->value, look.match->len, h,
-                                  this->fd, coll, 'N' );
+            if ( cvt.convert_rv( look.match->value,
+                                 look.match->subj_len ) == 0 ) {
+              NotifyPattern npat( cvt, look.match->value, look.match->subj_len,
+                                  h, this->fd, coll, 'N' );
               this->sub_route.del_pat( npat );
             }
             this->map.unsub_remove( look );
@@ -579,22 +610,45 @@ bool
 EvNatsService::fwd_msg( EvPublish &pub,  const void *sid,
                         size_t sid_len ) noexcept
 {
+  const char  * sub  = pub.subject,
+              * rep  = (const char *) pub.reply;
+  size_t     sublen  = pub.subject_len,
+             replen  = pub.reply_len,
+             preflen = this->prefix_len;
+
+  if ( sublen < preflen ) {
+    fprintf( stderr, "sub %.*s is less than prefix (%u)\n",
+             (int) sublen, sub, (int) preflen );
+    return true;
+  }
+  if ( replen != 0 && replen < preflen ) {
+    fprintf( stderr, "rep %.*s is less than prefix (%u)\n",
+             (int) replen, rep, (int) preflen );
+    return true;
+  }
+  sublen -= preflen;
+  sub     = &sub[ preflen ];
+  if ( replen > 0 ) {
+    replen -= preflen;
+    rep     = &rep[ preflen ];
+  }
+
   size_t msg_len_digits = uint64_digits( pub.msg_len );
-  size_t len = 4 +                                  /* MSG */
-               pub.subject_len + 1 +                /* <subject> */
-               sid_len + 1 +                        /* <sid> */
-    ( pub.reply_len > 0 ? pub.reply_len + 1 : 0 ) + /* [reply] */
-               msg_len_digits + 2 +             /* <size> \r\n */
-               pub.msg_len + 2;                     /* <blob> \r\n */
+  size_t len = 4 +                    /* MSG */
+               sublen + 1 +           /* <subject> */
+               sid_len + 1 +          /* <sid> */
+    ( replen > 0 ? replen + 1 : 0 ) + /* [reply] */
+               msg_len_digits + 2 +   /* <size> \r\n */
+               pub.msg_len + 2;       /* <blob> \r\n */
   char *p = this->alloc( len );
 
   p = concat_hdr( p, "MSG ", 4 );
-  p = concat_hdr( p, pub.subject, pub.subject_len );
+  p = concat_hdr( p, sub, sublen );
   *p++ = ' ';
   p = concat_hdr( p, (const char *) sid, sid_len );
   *p++ = ' ';
-  if ( pub.reply_len > 0 ) {
-    p = concat_hdr( p, (const char *) pub.reply, pub.reply_len );
+  if ( replen > 0 ) {
+    p = concat_hdr( p, rep, replen );
     *p++ = ' ';
   }
   uint64_to_string( pub.msg_len, p, msg_len_digits );

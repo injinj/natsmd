@@ -17,7 +17,7 @@ struct EvNatsListen : public kv::EvTcpListen {
   EvNatsListen( kv::EvPoll &p,  kv::RoutePublish &sr ) noexcept;
   EvNatsListen( kv::EvPoll &p ) noexcept;
 
-  virtual EvSocket *accept( void ) noexcept;
+  virtual kv::EvSocket *accept( void ) noexcept;
   virtual int listen( const char *ip,  int port,  int opts ) noexcept;
 };
 
@@ -57,10 +57,12 @@ struct EvNatsService : public kv::EvConnection {
           * user,
           * pass,
           * auth_token;
+  char      prefix[ 16 ];
+  uint16_t  prefix_len;
 
   EvNatsService( kv::EvPoll &p,  const uint8_t t,  EvNatsListen &l )
     : kv::EvConnection( p, t ), sub_route( l.sub_route ) {}
-  void initialize_state( void ) {
+  void initialize_state( const char *pre,  size_t prelen ) {
     this->msg_ptr   = NULL;
     this->msg_len   = 0;
     this->msg_state = NATS_HDR_STATE;
@@ -76,6 +78,8 @@ struct EvNatsService : public kv::EvConnection {
     this->protocol = 1;
     this->name = this->lang = this->version = NULL;
     this->user = this->pass = this->auth_token = NULL;
+    this->prefix_len = prelen;
+    ::memcpy( this->prefix, pre, prelen );
   }
   /*HashData * resize_tab( HashData *curr,  size_t add_len );*/
   char *save_string( const void *ptr,  size_t len ) {
