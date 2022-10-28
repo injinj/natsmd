@@ -123,8 +123,8 @@ endif
 
 natsmd_lib  := $(libd)/libnatsmd.a
 rpath       := -Wl,-rpath,$(pwd)/$(libd)$(rpath1)$(rpath2)$(rpath3)$(rpath4)$(rpath5)$(rpath6)$(rpath7)
-lnk_lib     += -lpcre2-8
-dlnk_lib    += -lpcre2-8
+lnk_lib     += -lpcre2-8 -lcares
+dlnk_lib    += -lpcre2-8 -lcares
 malloc_lib  :=
 
 .PHONY: everything
@@ -316,9 +316,9 @@ CMakeLists.txt: .copr/Makefile
 	  link_libraries (natsmd raikv raimd decnumber pcre2-8-static ws2_32)
 	else ()
 	  if (TARGET pcre2-8-static)
-	    link_libraries (natsmd raikv raimd decnumber pcre2-8-static -lpthread -lrt)
+	    link_libraries (natsmd raikv raimd decnumber pcre2-8-static -lcares -lpthread -lrt)
 	  else ()
-	    link_libraries (natsmd raikv raimd decnumber -lpcre2-8 -lpthread -lrt)
+	    link_libraries (natsmd raikv raimd decnumber -lpcre2-8 -lcares -lpthread -lrt)
 	  endif ()
 	endif ()
 	add_definitions(-DNATSMD_VER=$(ver_build))
@@ -329,15 +329,15 @@ CMakeLists.txt: .copr/Makefile
 
 .PHONY: dnf_depend
 dnf_depend:
-	sudo dnf -y install make gcc-c++ git redhat-lsb openssl-devel pcre2-devel chrpath
+	sudo dnf -y install make gcc-c++ git redhat-lsb openssl-devel pcre2-devel chrpath c-ares-devel
 
 .PHONY: yum_depend
 yum_depend:
-	sudo yum -y install make gcc-c++ git redhat-lsb openssl-devel pcre2-devel chrpath
+	sudo yum -y install make gcc-c++ git redhat-lsb openssl-devel pcre2-devel chrpath c-ares-devel
 
 .PHONY: deb_depend
 deb_depend:
-	sudo apt-get install -y install make g++ gcc devscripts libpcre2-dev chrpath git lsb-release libssl-dev
+	sudo apt-get install -y install make g++ gcc devscripts libpcre2-dev chrpath git lsb-release libssl-dev c-ares-dev
 
 # create directories
 $(dependd):
