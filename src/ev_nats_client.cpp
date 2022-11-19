@@ -837,35 +837,43 @@ EvNatsClient::parse_info( const char *buf,  size_t bufsz ) noexcept
   }
   char outbuf[ 1024 ], *o = outbuf;
   size_t bsz = sizeof( outbuf );
-  int len = snprintf( o, bsz, "CONNECT {" );
+  int n, len = snprintf( o, bsz, "CONNECT {" );
   o = &outbuf[ len ]; bsz = sizeof( outbuf ) - len;
   if ( this->name != NULL ) {
-    len += snprintf( o, bsz, "\"name\":\"%s\",", this->name );
+    n = snprintf( o, bsz, "\"name\":\"%s\",", this->name );
+    len += min_int( n, (int) bsz - 1 );
     o = &outbuf[ len ]; bsz = sizeof( outbuf ) - len;
   }
-  if ( this->user != NULL ) {
-    len += snprintf( o, bsz, "\"user\":\"%s\",", this->user );
+  if ( this->user != NULL && (size_t) len < bsz ) {
+    n = snprintf( o, bsz, "\"user\":\"%s\",", this->user );
+    len += min_int( n, (int) bsz - 1 );
     o = &outbuf[ len ]; bsz = sizeof( outbuf ) - len;
   }
-  if ( this->pass != NULL ) {
-    len += snprintf( o, bsz, "\"pass\":\"%s\",", this->pass );
+  if ( this->pass != NULL && (size_t) len < bsz ) {
+    n = snprintf( o, bsz, "\"pass\":\"%s\",", this->pass );
+    len += min_int( n, (int) bsz - 1 );
     o = &outbuf[ len ]; bsz = sizeof( outbuf ) - len;
   }
-  if ( this->auth_token != NULL ) {
-    len += snprintf( o, bsz, "\"auth_token\":\"%s\",", this->auth_token );
+  if ( this->auth_token != NULL && (size_t) len < bsz ) {
+    n = snprintf( o, bsz, "\"auth_token\":\"%s\",", this->auth_token );
+    len += min_int( n, (int) bsz - 1 );
     o = &outbuf[ len ]; bsz = sizeof( outbuf ) - len;
   }
-  if ( this->lang != NULL ) {
-    len += snprintf( o, bsz, "\"lang\":\"%s\",", this->lang );
+  if ( this->lang != NULL && (size_t) len < bsz ) {
+    n = snprintf( o, bsz, "\"lang\":\"%s\",", this->lang );
+    len += min_int( n, (int) bsz - 1 );
     o = &outbuf[ len ]; bsz = sizeof( outbuf ) - len;
   }
-  if ( this->version != NULL ) {
-    len += snprintf( o, bsz, "\"version\":\"%s\",", this->version );
+  if ( this->version != NULL && (size_t) len < bsz ) {
+    n = snprintf( o, bsz, "\"version\":\"%s\",", this->version );
+    len += min_int( n, (int) bsz - 1 );
     o = &outbuf[ len ]; bsz = sizeof( outbuf ) - len;
   }
-  len += snprintf( &outbuf[ len ], bsz,
-                   "\"verbose\":false,\"echo\":false}\r\n" );
-
+  if ( (size_t) len < bsz ) {
+    n = snprintf( &outbuf[ len ], bsz,
+                     "\"verbose\":false,\"echo\":false}\r\n" );
+    len += min_int( n, (int) bsz - 1 );
+  }
   if ( nats_client_cmd_verbose )
     printf( "%.*s", len, outbuf );
   this->append( outbuf, len );
