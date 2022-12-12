@@ -164,6 +164,17 @@ struct NatsSubData {
   bool equals( const NatsStr &str ) const {
     return this->equals( str.str, str.len );
   }
+  bool match_sid( SidEntry &entry ) {
+    if ( entry.subj_hash != this->hash )
+      return false;
+    NatsStr sid( entry.value, entry.len );
+    NatsStr xsid;
+    for ( bool b = this->first_sid( xsid ); b; b = this->next_sid( xsid ) ) {
+      if ( sid.equals( xsid ) )
+        return true;
+    }
+    return false;
+  }
   NatsSubStatus unsub( SidEntry &entry, uint64_t max_msgs ) {
     if ( entry.subj_hash != this->hash )
       return NATS_NOT_FOUND;
@@ -322,17 +333,24 @@ struct NatsSubMap {
 
   void print( void ) noexcept;
   /* add a subject and sid */
-  NatsSubStatus put( NatsStr &subj,  NatsStr &sid,  bool &collision ) {
-    kv::RouteLoc loc;
-    SidEntry   * entry;
-    uint32_t     hcnt;
+  NatsSubStatus put( NatsStr &subj,  NatsStr &sid,  bool &collision,
+                     NatsSubRoute *&sub_rt ) {
+    kv::RouteLoc   loc;
+    SidEntry     * entry;
+    NatsSubRoute * rt;
+    uint32_t       hcnt;
 
     entry = this->sid_tab.upsert( sid.hash(), sid.str, sid.len, loc );
-    if ( entry == NULL || ! loc.is_new )
+    if ( entry == NULL || ! loc.is_new ) {
+      if ( entry != NULL ) {
+        rt = this->sub_tab.find( subj.hash(), subj.str, subj.len );
+        if ( rt != NULL && rt->match_sid( *entry ) )
+          sub_rt = rt;
+      }
       return NATS_EXISTS;
+    }
     entry->init( subj.hash() );
-    NatsSubRoute *rt = this->sub_tab.upsert2( subj.hash(), subj.str, subj.len,
-                                              loc, hcnt );
+    rt = this->sub_tab.upsert2( subj.hash(), subj.str, subj.len, loc, hcnt );
     if ( loc.is_new ) {
       rt->init( subj.len );
       collision = ( hcnt > 0 );
@@ -355,23 +373,37 @@ struct NatsSubMap {
       }
       rt->add_sid( sid );
     }
+    sub_rt = rt;
     return loc.is_new ? NATS_IS_NEW : NATS_OK;
   }
   /* add a pattern and sid */
   NatsSubStatus put_wild( NatsStr &subj,  kv::PatternCvt &cvt,
-                          NatsStr &pre,  NatsStr &sid,  bool &collision ) {
-    kv::RouteLoc    loc;
-    SidEntry      * entry;
-    NatsWildMatch * m = NULL, * m2;
-    uint32_t        hcnt;
+                          NatsStr &pre,  NatsStr &sid,  bool &collision,
+                          NatsWildMatch *&sub_m ) {
+    kv::RouteLoc       loc;
+    SidEntry         * entry;
+    NatsWildMatch    * m = NULL, * m2;
+    NatsPatternRoute * rt;
+    uint32_t           hcnt;
 
     entry = this->sid_tab.upsert( sid.hash(), sid.str, sid.len, loc );
-    if ( entry == NULL || ! loc.is_new )
+    if ( entry == NULL || ! loc.is_new ) {
+      if ( entry != NULL ) {
+        rt = this->pat_tab.find( pre.hash(), pre.str, pre.len );
+        if ( rt != NULL ) {
+          for ( m = rt->list.hd; m != NULL; m = m->next ) {
+            if ( m->equals( subj ) )
+              break;
+          }
+          if ( m != NULL && m->match_sid( *entry ) )
+            sub_m = m;
+        }
+      }
       return NATS_EXISTS;
+    }
     entry->init( subj.hash(), pre.hash() );
 
-    NatsPatternRoute *rt = this->pat_tab.upsert2( pre.hash(), pre.str,
-                                                  pre.len, loc, hcnt );
+    rt = this->pat_tab.upsert2( pre.hash(), pre.str, pre.len, loc, hcnt );
     if ( loc.is_new ) {
       rt->init();
       collision = ( hcnt > 0 );
@@ -393,6 +425,7 @@ struct NatsSubMap {
       }
       rt->list.push_hd( m );
       rt->count++;
+      sub_m = m;
       return NATS_IS_NEW;
     }
     /* existing wildcard match */
@@ -407,6 +440,7 @@ struct NatsSubMap {
       rt->list.push_hd( m );
     }
     entry->msg_cnt = m->msg_cnt;
+    sub_m = m;
     return NATS_OK;
   }
   /* unsubscribe an sid */
@@ -486,6 +520,28 @@ struct NatsSubMap {
           return NATS_NOT_FOUND;
         count++;
       }
+    }
+  }
+  /* find subj by sid */
+  NatsSubStatus find_by_sid( NatsStr &sid,  NatsLookup &look ) {
+    kv::RouteLoc sid_loc;
+    SidEntry   * entry;
+
+    look.init();
+    entry = this->sid_tab.find( sid.hash(), sid.str, sid.len, sid_loc );
+    if ( entry == NULL )
+      return NATS_NOT_FOUND;
+
+    look.hash = entry->subj_hash;
+    look.rt = this->sub_tab.find_by_hash( look.hash, look.loc );
+    if ( look.rt == NULL )
+      return NATS_NOT_FOUND;
+    for (;;) {
+      if ( look.rt->match_sid( *entry ) )
+        return NATS_OK;
+      look.rt = this->sub_tab.find_next_by_hash( look.hash, look.loc );
+      if ( look.rt == NULL )
+        return NATS_NOT_FOUND;
     }
   }
   /* remove after unsubscribe */

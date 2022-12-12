@@ -28,6 +28,8 @@ natsmd_get_version( void )
   return kv_stringify( NATSMD_VER );
 }
 }
+uint32_t rai::natsmd::nats_debug = 0;
+
 using namespace rai;
 using namespace natsmd;
 using namespace kv;
@@ -194,7 +196,7 @@ EvNatsService::process( void ) noexcept
     fl      = 0;
     /*cmd_cnt = 0;*/
     /*msg_cnt = 0;*/
-    verb_ok = ( this->verbose ? DO_OK : 0 );
+    verb_ok = ( this->user.verbose ? DO_OK : 0 );
     /* decode nats hdrs */
     for ( p = start; p < end; ) {
       if ( this->msg_state == NATS_HDR_STATE ) {
@@ -202,7 +204,22 @@ EvNatsService::process( void ) noexcept
         if ( eol != NULL ) {
           linesz = &eol[ 1 ] - p;
           if ( linesz > 3 ) {
-            switch ( unaligned<uint32_t>( p ) & 0xdfdfdfdf ) { /* 4 toupper */
+            uint32_t kw = unaligned<uint32_t>( p ) & 0xdfdfdfdf; /* 4 toupper */
+            if ( this->user.stamp == 0 ) {
+              switch ( kw ) {
+                case NATS_KW_SUB1:
+                case NATS_KW_SUB2:
+                case NATS_KW_PUB1:
+                case NATS_KW_PUB2:
+                case NATS_KW_UNSUB:
+                case NATS_KW_PING: /* setup user if none specified */
+                  this->parse_connect( NULL, 0 );
+                  break;
+                default:
+                  break;
+              }
+            }
+            switch ( kw ) {
             /*case NATS_KW_OK1:     // client side only
               case NATS_KW_OK2:     break;
               case NATS_KW_MSG1:   // MSG <subject> <sid> [reply] <size>
@@ -212,13 +229,27 @@ EvNatsService::process( void ) noexcept
               case NATS_KW_SUB2:
                 nargs = args.parse( &p[ 4 ], eol );
                 if ( nargs != 2 ) {
-                  fl |= DO_ERR;
-                  break;
+                  if ( nargs != 3 ) {
+                    fl |= DO_ERR;
+                    break;
+                  }
+                  /* SUB <subject> <queue> <sid> */
+                  this->subject     = args.ptr[ 0 ];
+                  this->queue       = args.ptr[ 1 ];
+                  this->sid         = args.ptr[ 2 ];
+                  this->subject_len = args.len[ 0 ];
+                  this->queue_len   = args.len[ 1 ];
+                  this->sid_len     = args.len[ 2 ];
                 }
-                this->subject     = args.ptr[ 0 ];
-                this->sid         = args.ptr[ 1 ];
-                this->subject_len = args.len[ 0 ];
-                this->sid_len     = args.len[ 1 ];
+                else {
+                  /* SUB <subject> <sid> */
+                  this->subject     = args.ptr[ 0 ];
+                  this->queue       = NULL;
+                  this->sid         = args.ptr[ 1 ];
+                  this->subject_len = args.len[ 0 ];
+                  this->queue_len   = 0;
+                  this->sid_len     = args.len[ 1 ];
+                }
                 this->add_sub();
                 fl |= verb_ok;
                 break;
@@ -230,7 +261,7 @@ EvNatsService::process( void ) noexcept
                   fl |= DO_ERR;
                   break;
                 }
-                if ( linesz <= this->tmp_size ) {
+                if ( linesz <= sizeof( this->buffer ) ) {
                   ::memcpy( this->buffer, p, linesz );
                   size_start = &this->buffer[ size_start - p ];
                   p = this->buffer;
@@ -398,15 +429,16 @@ EvNatsService::is_psubscribed( const NotifyPattern &pat ) noexcept
 void
 EvNatsService::add_sub( void ) noexcept
 {
-  const char * sub     = this->subject;
-  size_t       sublen  = this->subject_len,
-               preflen = this->prefix_len;
+  const char * sub       = this->subject;
+  size_t       sublen    = this->subject_len,
+               preflen   = this->prefix_len;
+  char       * inbox     = NULL;
+  size_t       inbox_len = 0;
 
   if ( preflen > 0 ) {
-    char *tmp = this->alloc_temp( sublen + preflen );
-    ::memcpy( tmp, this->prefix, preflen );
-    ::memcpy( &tmp[ preflen ], sub, sublen );
-    sub     = tmp;
+    CatPtr tmp( this->alloc_temp( sublen + preflen ) );
+    tmp.x( this->prefix, preflen ).x( sub, sublen );
+    sub     = tmp.start;
     sublen += preflen;
   }
 
@@ -414,6 +446,10 @@ EvNatsService::add_sub( void ) noexcept
   NatsStr subj( sub, sublen );
   bool    coll = false;
   NatsSubStatus status;
+
+  if ( is_nats_debug )
+    printf( "add_sub %.*s sid %.*s\n", (int) sublen, sub,
+            (int) this->sid_len, this->sid );
 
   if ( subj.is_wild() ) {
     PatternCvt cvt;
@@ -423,18 +459,45 @@ EvNatsService::add_sub( void ) noexcept
       uint32_t h = kv_crc_c( subj.str, cvt.prefixlen,
                              this->sub_route.prefix_seed( cvt.prefixlen ) );
       NatsStr pre( subj.str, cvt.prefixlen, h );
-      status = this->map.put_wild( subj, cvt, pre, sid, coll );
-      if ( status == NATS_IS_NEW ) {
-        NotifyPattern npat( cvt, subj.str, subj.len, h, this->fd, coll, 'N' );
-        this->sub_route.add_pat( npat );
+      NatsWildMatch * sub_m = NULL;
+      status = this->map.put_wild( subj, cvt, pre, sid, coll, sub_m );
+      if ( status == NATS_IS_NEW || status == NATS_OK ||
+           ( status == NATS_EXISTS && sub_m != NULL ) ) {
+        NotifyPattern npat( cvt, subj.str, subj.len, h,
+                            this->fd, coll, 'N', this );
+        if ( status == NATS_IS_NEW )
+          this->sub_route.add_pat( npat );
+        else {
+          npat.sub_count = sub_m->refcnt;
+          this->sub_route.notify_pat( npat );
+        }
       }
     }
   }
   else {
-    status = this->map.put( subj, sid, coll );
-    if ( status == NATS_IS_NEW ) {
-      NotifySub nsub( subj.str, subj.len, subj.hash(), this->fd, coll, 'N' );
-      this->sub_route.add_sub( nsub );
+    if ( this->session_len > 0 ) {
+      CatPtr ibx( this->alloc_temp( preflen + 7 + this->session_len + 1 +
+                                    this->sid_len + 1 ) );
+      ibx.x( this->prefix, preflen ).s( "_INBOX." )
+         .x( this->session, this->session_len ).c( '.' )
+         .x( this->sid, this->sid_len ).end();
+
+      inbox     = ibx.start;
+      inbox_len = ibx.len();
+    }
+
+    NatsSubRoute * sub_rt = NULL;
+    status = this->map.put( subj, sid, coll, sub_rt );
+    if ( status == NATS_IS_NEW || status == NATS_OK ||
+         ( status == NATS_EXISTS && sub_rt != NULL ) ) {
+      NotifySub nsub( subj.str, subj.len, inbox, inbox_len, subj.hash(),
+                      this->fd, coll, 'N', this );
+      if ( status == NATS_IS_NEW )
+        this->sub_route.add_sub( nsub );
+      else {
+        nsub.sub_count = sub_rt->refcnt;
+        this->sub_route.notify_sub( nsub );
+      }
     }
   }
   if ( status > NATS_EXISTS ) {
@@ -455,14 +518,14 @@ EvNatsService::rem_sid( uint64_t max_msgs ) noexcept
   if ( status == NATS_EXPIRED ) {
     if ( look.rt != NULL ) {
       NotifySub nsub( look.rt->value, look.rt->subj_len, look.hash, this->fd,
-                      coll, 'N' );
+                      coll, 'N', this );
       this->sub_route.del_sub( nsub );
     }
     else {
       PatternCvt cvt;
       if ( cvt.convert_rv( look.match->value, look.match->subj_len ) == 0 ) {
         NotifyPattern npat( cvt, look.match->value, look.match->subj_len,
-                            look.hash, this->fd, coll, 'N' );
+                            look.hash, this->fd, coll, 'N', this );
         this->sub_route.del_pat( npat );
       }
     }
@@ -480,7 +543,7 @@ EvNatsService::rem_all_sub( void ) noexcept
   for ( r = this->map.sub_tab.first( loc ); r;
         r = this->map.sub_tab.next( loc ) ) {
     bool coll = this->map.sub_tab.rem_collision( r );
-    NotifySub nsub( r->value, r->subj_len, r->hash, this->fd, coll, 'N' );
+    NotifySub nsub( r->value, r->subj_len, r->hash, this->fd, coll, 'N', this );
     this->sub_route.del_sub( nsub );
   }
   for ( p = this->map.pat_tab.first( loc ); p;
@@ -490,7 +553,7 @@ EvNatsService::rem_all_sub( void ) noexcept
       if ( cvt.convert_rv( m->value, m->subj_len ) == 0 ) {
         bool coll = this->map.pat_tab.rem_collision( p, m );
         NotifyPattern npat( cvt, m->value, m->subj_len, p->hash,
-                            this->fd, coll, 'N' );
+                            this->fd, coll, 'N', this );
         this->sub_route.del_pat( npat );
       }
     }
@@ -506,16 +569,14 @@ EvNatsService::fwd_pub( void ) noexcept
   size_t     sublen = this->subject_len,
              replen = this->reply_len;
   if ( preflen > 0 ) {
-    char * tmp = this->alloc_temp( sublen + preflen );
-    ::memcpy( tmp, this->prefix, preflen );
-    ::memcpy( &tmp[ preflen ], sub, sublen );
-    sub     = tmp;
+    CatPtr tmp( this->alloc_temp( sublen + preflen ) );
+    tmp.x( this->prefix, preflen ).x( sub, sublen );
+    sub     = tmp.start;
     sublen += preflen;
     if ( replen > 0 ) {
-      tmp = this->alloc_temp( replen + preflen );
-      ::memcpy( tmp, this->prefix, preflen );
-      ::memcpy( &tmp[ preflen ], rep, replen );
-      rep     = tmp;
+      CatPtr tmp( this->alloc_temp( replen + preflen ) );
+      tmp.x( this->prefix, preflen ).x( rep, replen );
+      rep     = tmp.start;
       replen += preflen;
     }
   }
@@ -530,28 +591,32 @@ EvNatsService::fwd_pub( void ) noexcept
 bool
 EvNatsService::on_msg( EvPublish &pub ) noexcept
 {
-  NatsStr       subj, sid, pre;
-  NatsLookup    look;
-  NatsSubStatus status;
-  bool          b, coll, flow_good = true;
+  NatsStr          subj, sid, pre;
+  NatsLookup       look;
+  NatsMsgTransform xf( pub, sid );
+  NatsSubStatus    status;
+  bool             b, coll, flow_good = true;
 
   /* if client does not want to see the msgs it published */
-  if ( ! this->echo && (uint32_t) this->fd == pub.src_route )
+  if ( ! this->user.echo && (uint32_t) this->fd == pub.src_route )
     return true;
+
   for ( uint8_t cnt = 0; cnt < pub.prefix_cnt; cnt++ ) {
     uint32_t h = pub.hash[ cnt ];
     if ( pub.subj_hash == h ) {
       subj.set( pub.subject, pub.subject_len, h );
       status = this->map.lookup_publish( subj, look );
-      for ( b = look.rt->first_sid( sid ); b; b = look.rt->next_sid( sid ) ) {
-        flow_good &= this->fwd_msg( pub, sid.str, sid.len );
-      }
-      if ( status == NATS_EXPIRED ) {
-        status = this->map.expired( look, coll );
+      if ( status != NATS_NOT_FOUND ) { /* OK or EXPIRED */
+        for ( b = look.rt->first_sid( sid ); b; b = look.rt->next_sid( sid ) ) {
+          flow_good &= this->fwd_msg( pub, xf );
+        }
         if ( status == NATS_EXPIRED ) {
-          NotifySub nsub( subj.str, subj.len, h, this->fd, coll, 'N' );
-          this->sub_route.del_sub( nsub );
-          this->map.unsub_remove( look );
+          status = this->map.expired( look, coll );
+          if ( status == NATS_EXPIRED ) {
+            NotifySub nsub( subj.str, subj.len, h, this->fd, coll, 'N', this );
+            this->sub_route.del_sub( nsub );
+            this->map.unsub_remove( look );
+          }
         }
       }
     }
@@ -559,12 +624,15 @@ EvNatsService::on_msg( EvPublish &pub ) noexcept
       pre.set( pub.subject, pub.prefix[ cnt ], h );
       subj.set( pub.subject, pub.subject_len );
       status = this->map.lookup_pattern( pre, subj, look );
+
       for (;;) {
         if ( status == NATS_NOT_FOUND )
           break;
         for ( b = look.match->first_sid( sid ); b;
               b = look.match->next_sid( sid ) ) {
-          flow_good &= this->fwd_msg( pub, sid.str, sid.len );
+          if ( sid.len == 1 && sid.str[ 0 ] == 'I' )
+            return this->on_inbox_reply( pub );
+          flow_good &= this->fwd_msg( pub, xf );
         }
         if ( status == NATS_EXPIRED ) {
           status = this->map.expired_pattern( look, coll );
@@ -573,7 +641,7 @@ EvNatsService::on_msg( EvPublish &pub ) noexcept
             if ( cvt.convert_rv( look.match->value,
                                  look.match->subj_len ) == 0 ) {
               NotifyPattern npat( cvt, look.match->value, look.match->subj_len,
-                                  h, this->fd, coll, 'N' );
+                                  h, this->fd, coll, 'N', this );
               this->sub_route.del_pat( npat );
             }
             this->map.unsub_remove( look );
@@ -588,6 +656,38 @@ EvNatsService::on_msg( EvPublish &pub ) noexcept
 }
 
 bool
+EvNatsService::on_inbox_reply( EvPublish &pub ) noexcept
+{
+  /* if inbox reply */
+  const char * sub = pub.subject;
+  size_t       off = pub.subject_len;
+  while ( off > 0 && sub[ off - 1 ] != '.' )
+    off--;
+  const char * sid     = &sub[ off ];
+  size_t       sid_len = pub.subject_len - off;
+  NatsStr sid2( sid, sid_len );
+  NatsLookup look;
+  if ( this->map.find_by_sid( sid2, look ) == NATS_OK &&
+       look.rt != NULL ) {
+    EvPublish pub2( pub );
+    MDMsgMem  tmp;
+    uint32_t  tmp_hash[ 1 ];
+    size_t    len = look.rt->subj_len;
+    char    * sub = tmp.str_make( len  );
+
+    ::memcpy( sub, look.rt->value, len );
+    pub2.subject_len = len;
+    pub2.subject     = sub;
+    pub2.subj_hash   = look.rt->hash;
+    pub2.hash        = tmp_hash;
+    pub2.prefix_cnt  = 1;
+    tmp_hash[ 0 ]    = pub2.subj_hash;
+    return this->on_msg( pub2 );
+  }
+  return true;
+}
+
+bool
 EvNatsService::hash_to_sub( uint32_t h,  char *key,  size_t &keylen ) noexcept
 {
   NatsSubRoute * rt;
@@ -599,17 +699,11 @@ EvNatsService::hash_to_sub( uint32_t h,  char *key,  size_t &keylen ) noexcept
   return false;
 }
 
-static inline char *
-concat_hdr( char *p,  const char *q,  size_t sz )
-{
-  do { *p++ = *q++; } while ( --sz > 0 );
-  return p;
-}
-
 bool
-EvNatsService::fwd_msg( EvPublish &pub,  const void *sid,
-                        size_t sid_len ) noexcept
+EvNatsService::fwd_msg( EvPublish &pub,  NatsMsgTransform &xf ) noexcept
 {
+  const char  * sid  = xf.sid.str;
+  size_t    sid_len  = xf.sid.len;
   const char  * sub  = pub.subject,
               * rep  = (const char *) pub.reply;
   size_t     sublen  = pub.subject_len,
@@ -632,35 +726,43 @@ EvNatsService::fwd_msg( EvPublish &pub,  const void *sid,
     replen -= preflen;
     rep     = &rep[ preflen ];
   }
+  xf.check_transform();
 
-  size_t msg_len_digits = uint64_digits( pub.msg_len );
+  size_t msg_len_digits = uint64_digits( xf.msg_len );
   size_t len = 4 +                    /* MSG */
                sublen + 1 +           /* <subject> */
                sid_len + 1 +          /* <sid> */
     ( replen > 0 ? replen + 1 : 0 ) + /* [reply] */
                msg_len_digits + 2 +   /* <size> \r\n */
-               pub.msg_len + 2;       /* <blob> \r\n */
-  char *p = this->alloc( len );
+               xf.msg_len + 2;        /* <blob> \r\n */
+  CatPtr p( this->alloc( len ) );
 
-  p = concat_hdr( p, "MSG ", 4 );
-  p = concat_hdr( p, sub, sublen );
-  *p++ = ' ';
-  p = concat_hdr( p, (const char *) sid, sid_len );
-  *p++ = ' ';
-  if ( replen > 0 ) {
-    p = concat_hdr( p, rep, replen );
-    *p++ = ' ';
-  }
-  uint64_to_string( pub.msg_len, p, msg_len_digits );
-  p = &p[ msg_len_digits ];
-
-  *p++ = '\r'; *p++ = '\n';
-  ::memcpy( p, pub.msg, pub.msg_len );
-  p += pub.msg_len;
-  *p++ = '\r'; *p++ = '\n';
+  p.s( "MSG " ).x( sub, sublen ).c( ' ' )
+               .x( sid, sid_len ).c( ' ' );
+  if ( replen > 0 )
+    p.x( rep, replen ).c( ' ' );
+  p.u( xf.msg_len, msg_len_digits ).s( "\r\n" )
+   .b( xf.msg, xf.msg_len ).s( "\r\n" );
 
   this->sz += len;
   return this->idle_push_write();
+}
+
+void
+NatsMsgTransform::transform( void ) noexcept
+{
+  MDMsg * m = MDMsg::unpack( (void *) this->msg, 0, this->msg_len, 0,
+                             NULL, &this->spc );
+  if ( m == NULL )
+    return;
+
+  size_t max_len = ( ( this->msg_len | 15 ) + 1 ) * 16;
+  char * start = this->spc.str_make( max_len );
+  JsonMsgWriter jmsg( start, max_len );
+  if ( jmsg.convert_msg( *m ) == 0 && jmsg.finish() ) {
+    this->msg     = start;
+    this->msg_len = jmsg.off;
+  }
 }
 
 void
@@ -677,41 +779,145 @@ EvNatsService::release( void ) noexcept
   this->rem_all_sub();
   this->map.release();
   this->EvConnection::release_buffers();
+  if ( this->notify != NULL )
+    this->notify->on_shutdown( *this, NULL, 0 );
+  this->user.release();
 }
 
-bool EvNatsService::timer_expire( uint64_t, uint64_t ) noexcept
+bool
+EvNatsService::timer_expire( uint64_t, uint64_t ) noexcept
 {
   return false;
 }
 
+size_t
+EvNatsService::get_userid( char userid[ MAX_USERID_LEN ] ) noexcept
+{
+  if ( this->user.user != NULL ) {
+    size_t len = min_int( MAX_USERID_LEN - 1, ::strlen( this->user.user ) );
+    ::memcpy( userid, this->user.user, len );
+    return len;
+  }
+  userid[ 0 ] = '\0';
+  return 0;
+}
+
+void
+EvNatsService::set_session( const char *sess,  size_t sess_len ) noexcept
+{
+  if ( sess_len == 0 || sess_len >= sizeof( this->session ) ) {
+    fprintf( stderr, "bad session_len %lu\n", sess_len );
+    this->session_len = 0;
+    return;
+  }
+  ::memcpy( this->session, sess, sess_len );
+  this->session[ sess_len ] = '\0';
+  this->session_len = sess_len;
+
+  static char inbox_sid[] = "I";
+  CatBuf< 7 + sizeof( this->session ) + 3 > inbox;
+
+  inbox.s( "_INBOX." ).x( sess, sess_len ).s( ".>" ).end();
+
+  this->subject     = inbox.buf;
+  this->subject_len = inbox.len();
+  this->sid         = inbox_sid;
+  this->sid_len     = 1;
+  this->reply       = NULL;
+  this->reply_len   = 0;
+  this->queue       = NULL;
+  this->queue_len   = 0;
+
+  this->add_sub();
+}
+
+size_t
+EvNatsService::get_session( const char *svc,  size_t svc_len,
+                            char session[ MAX_SESSION_LEN ] ) noexcept
+{
+  if ( this->session_len > 0 ) {
+    bool match = ( svc_len == 0 ||
+                   ( svc_len == this->prefix_len &&
+                     ::memcmp( svc, this->prefix, svc_len ) == 0 ) );
+    if ( match ) {
+      ::memcpy( session, this->session, this->session_len );
+      session[ this->session_len ] = '\0';
+      return this->session_len;
+    }
+  }
+  session[ 0 ] = '\0';
+  return 0;
+}
+
+size_t
+EvNatsService::get_subscriptions( SubRouteDB &subs,  SubRouteDB &pats,
+                                  int &pattern_fmt ) noexcept
+{
+  RouteLoc           pos,
+                     loc;
+  NatsSubRoute     * r;
+  NatsPatternRoute * p;
+  size_t             prelen = this->prefix_len,
+                     cnt    = 0,
+                     len;
+  const char       * val;
+  uint32_t           h;
+
+  pattern_fmt = RV_PATTERN_FMT;
+  for ( r = this->map.sub_tab.first( pos ); r != NULL;
+        r = this->map.sub_tab.next( pos ) ) {
+    val = &r->value[ prelen ];
+    len = r->subj_len - prelen;
+    h   = kv_crc_c( val, len, 0 );
+    subs.upsert( h, val, len, loc );
+    if ( loc.is_new )
+      cnt++;
+  }
+  for ( p = this->map.pat_tab.first( pos ); p != NULL;
+        p = this->map.pat_tab.next( pos ) ) {
+    for ( NatsWildMatch *m = p->list.hd; m != NULL; m = m->next ) {
+      val = &m->value[ prelen ];
+      len = m->subj_len - prelen;
+      h   = kv_crc_c( val, len, 0 );
+      pats.upsert( h, val, len, loc );
+      if ( loc.is_new )
+        cnt++;
+    }
+  }
+  return cnt;
+}
+
+
 void
 EvNatsService::parse_connect( const char *buf,  size_t bufsz ) noexcept
 {
-  const char * start, * end;/*, * p, * v, * comma;*/
+  const char  * start,
+              * end;
+  MDMsgMem      mem;
+  JsonMsg     * msg;
+  MDFieldIter * iter;
+  MDName        name;
+  MDReference   mref;
 
-  this->tmp_size = sizeof( this->buffer );
+  if ( bufsz == 0 )
+    goto do_notify;
   if ( (start = (const char *) ::memchr( buf, '{', bufsz )) == NULL )
-    return;
+    goto do_notify;
   bufsz -= start - buf;
   for ( end = &start[ bufsz ]; end > start; )
     if ( *--end == '}' )
       break;
 
   if ( end <= start )
-    return;
+    goto do_notify;
 
-  MDMsgMem      mem;
-  JsonMsg     * msg;
-  MDFieldIter * iter;
-  MDName        name;
-  MDReference   mref;
   msg = JsonMsg::unpack( (void *) start, 0, &end[ 1 ] - start, 0, NULL, &mem );
   if ( msg == NULL )
-    return;
+    goto do_notify;
   if ( msg->get_field_iter( iter ) != 0 )
-    return;
+    goto do_notify;
   if ( iter->first() != 0 )
-    return;
+    goto do_notify;
 
   do {
     if ( iter->get_name( name ) == 0 ) {
@@ -721,53 +927,62 @@ EvNatsService::parse_connect( const char *buf,  size_t bufsz ) noexcept
       switch ( ( unaligned<uint32_t>( name.fname ) ) & 0xdfdfdfdf ) {
         case NATS_JS_VERBOSE: /* verbose:false */
           if ( iter->get_reference( mref ) == 0 && mref.ftype == MD_BOOLEAN )
-            this->verbose = ( mref.fptr[ 0 ] != 0 );
+            this->user.verbose = ( mref.fptr[ 0 ] != 0 );
           break;
         case NATS_JS_PEDANTIC: /* pedantic:false */
           if ( iter->get_reference( mref ) == 0 && mref.ftype == MD_BOOLEAN )
-            this->pedantic = ( mref.fptr[ 0 ] != 0 );
+            this->user.pedantic = ( mref.fptr[ 0 ] != 0 );
           break;
         case NATS_JS_TLS_REQUIRE: /* tls_require:false */
           if ( iter->get_reference( mref ) == 0 && mref.ftype == MD_BOOLEAN )
-            this->tls_require = ( mref.fptr[ 0 ] != 0 );
+            this->user.tls_require = ( mref.fptr[ 0 ] != 0 );
           break;
         case NATS_JS_ECHO: /* echo:false */
           if ( iter->get_reference( mref ) == 0 && mref.ftype == MD_BOOLEAN )
-            this->echo = ( mref.fptr[ 0 ] != 0 );
+            this->user.echo = ( mref.fptr[ 0 ] != 0 );
           break;
         case NATS_JS_PROTOCOL: /* proto:1 */
           if ( iter->get_reference( mref ) == 0 )
-            cvt_number( mref, this->protocol );
+            cvt_number( mref, this->user.protocol );
           break;
         case NATS_JS_NAME: /* name:"str" */
           if ( iter->get_reference( mref ) == 0 && mref.ftype == MD_STRING )
-            this->name = this->save_string( mref.fptr, mref.fsize );
+            this->user.save_string( this->user.name, mref.fptr, mref.fsize );
           break;
         case NATS_JS_LANG: /* lang:"C" */
           if ( iter->get_reference( mref ) == 0 && mref.ftype == MD_STRING )
-            this->lang = this->save_string( mref.fptr, mref.fsize );
+            this->user.save_string( this->user.lang, mref.fptr, mref.fsize );
           break;
         case NATS_JS_VERSION: /* version:"str" */
           if ( iter->get_reference( mref ) == 0 && mref.ftype == MD_STRING )
-            this->version = this->save_string( mref.fptr, mref.fsize );
+            this->user.save_string( this->user.version, mref.fptr, mref.fsize );
           break;
         case NATS_JS_USER: /* user:"str" */
           if ( iter->get_reference( mref ) == 0 && mref.ftype == MD_STRING )
-            this->user = this->save_string( mref.fptr, mref.fsize );
+            this->user.save_string( this->user.user, mref.fptr, mref.fsize );
           break;
         case NATS_JS_PASS: /* pass:"str" */
           if ( iter->get_reference( mref ) == 0 && mref.ftype == MD_STRING )
-            this->pass = this->save_string( mref.fptr, mref.fsize );
+            this->user.save_string( this->user.pass, mref.fptr, mref.fsize );
           break;
         case NATS_JS_AUTH_TOKEN: /* auth_token:"str" */
           if ( iter->get_reference( mref ) == 0 && mref.ftype == MD_STRING )
-            this->auth_token = this->save_string( mref.fptr, mref.fsize );
+            this->user.save_string( this->user.auth_token, mref.fptr,
+                                    mref.fsize );
           break;
         default:
           break;
       }
     }
   } while ( iter->next() == 0 );
+do_notify:;
+  if ( this->user.user == NULL || ::strlen( this->user.user ) == 0 )
+    this->user.save_string( this->user.user, "nobody", 6 );
+  if ( this->user.stamp == 0 ) {
+    this->user.stamp = this->active_ns;
+    if ( this->notify != NULL )
+      this->notify->on_connect( *this );
+  }
 }
 
 NatsWildMatch *

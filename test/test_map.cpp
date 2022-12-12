@@ -79,11 +79,13 @@ main( void )
             status = NATS_BAD_PATTERN;
           else {
             NatsStr pre( subj.str, cvt.prefixlen );
-            status = map.put_wild( subj, cvt, pre, sid, coll );
+            NatsWildMatch * sub_m;
+            status = map.put_wild( subj, cvt, pre, sid, coll, sub_m );
           }
         }
         else {
-          status = map.put( subj, sid, coll );
+          NatsSubRoute * sub_rt;
+          status = map.put( subj, sid, coll, sub_rt );
         }
         printf( "%s coll=%s\n", nats_status_str( status ), coll ? "t" : "f" );
         break;

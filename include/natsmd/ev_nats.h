@@ -2,13 +2,50 @@
 #define __rai_natsmd__ev_nats_h__
 
 #include <raikv/ev_tcp.h>
+#include <raikv/ev_publish.h>
 #include <natsmd/nats_map.h>
+#include <raimd/md_msg.h>
 
 extern "C" {
 const char *natsmd_get_version( void );
 }
 namespace rai {
 namespace natsmd {
+
+struct NatsLogin {
+  uint64_t stamp;       /* time of login */
+  bool     verbose,     /* whether +OK is sent */
+           pedantic,    /* whether subject is checked for validity */
+           tls_require, /* whether need TLS layer */
+           echo;        /* whether to forward pubs to subs owned by client
+                         (eg. multicast loopback) */
+  int      protocol;    /* == 1 */
+  char   * name,        /* connect parameters user:"str" */
+         * lang,        /*                    lang:"C" */
+         * version,     /*                    version:"1.1" */
+         * user,        /*                    user:"str" */
+         * pass,        /*                    pass:"str" */
+         * auth_token;  /*                    auth_token:"str" */
+  NatsLogin() {
+    ::memset( (void *) this, 0, sizeof( *this ) );
+    this->protocol = 1;
+    this->verbose = true;
+  }
+  void release( void ) {
+    for ( char ** i = &this->name; i <= &this->auth_token; i++ ) {
+      if ( *i != NULL )
+        ::free( *i );
+    }
+    ::memset( (void *) this, 0, sizeof( *this ) );
+    this->protocol = 1;
+    this->verbose = true;
+  }
+  static void save_string( char *&field,  const void *s,  size_t len ) {
+    field = (char *) ::realloc( field, len + 1 );
+    ::memcpy( field, s, len );
+    field[ len ] = '\0';
+  }
+};
 
 struct EvNatsListen : public kv::EvTcpListen {
   void * operator new( size_t, void *ptr ) { return ptr; }
@@ -28,74 +65,79 @@ enum NatsState {
   NATS_PUB_STATE = 1  /* parsing PUB message bytes */
 };
 
+struct NatsMsgTransform {
+  md::MDMsgMem spc;
+  const void * msg;
+  uint32_t     msg_len,
+               msg_enc;
+  NatsStr    & sid;
+  bool         is_ready;
+
+  NatsMsgTransform( kv::EvPublish &pub,  NatsStr &id )
+    : msg( pub.msg ), msg_len( pub.msg_len ), msg_enc( pub.msg_enc ),
+      sid( id ), is_ready( false ) {}
+
+  void check_transform( void ) {
+    if ( ! this->is_ready ) {
+      if ( this->msg_len == 0 || this->msg_enc == md::MD_STRING ) {
+        this->is_ready = true;
+        return;
+      }
+      this->transform();
+      this->is_ready = true;
+    }
+  }
+  void transform( void ) noexcept;
+};
+
 struct EvNatsService : public kv::EvConnection {
   void * operator new( size_t, void *ptr ) { return ptr; }
   kv::RoutePublish & sub_route;
+  EvNatsListen     & listen;
+
   NatsSubMap map;
+  char     * msg_ptr;     /* ptr to the msg blob */
+  size_t     msg_len;     /* size of the current message blob */
+  NatsState  msg_state;   /* ascii hdr mode or binary blob mode */
+  char     * subject;     /* either pub or sub subject w/opt reply: */
+  size_t     subject_len; /* PUB <subject> <reply> */
+  char     * reply;       /* SUB <subject> <sid> */
+  size_t     reply_len;   /* len of reply */
+  char     * sid;         /* <sid> of SUB */
+  size_t     sid_len;     /* len of sid */
+  char     * queue;
+  size_t     queue_len;
 
-  char    * msg_ptr;     /* ptr to the msg blob */
-  size_t    msg_len;     /* size of the current message blob */
-  NatsState msg_state;   /* ascii hdr mode or binary blob mode */
-  bool      verbose,     /* whether +OK is sent */
-            pedantic,    /* whether subject is checked for validity */
-            tls_require, /* whether need TLS layer */
-            echo;        /* whether to forward pubs to subs owned by client
-                             (eg. multicast loopback) */
-  char    * subject;     /* either pub or sub subject w/opt reply: */
-  size_t    subject_len; /* PUB <subject> <reply> */
-  char    * reply;       /* SUB <subject> <sid> */
-  size_t    reply_len;   /* len of reply */
-  char    * sid;         /* <sid> of SUB */
-  size_t    sid_len;     /* len of sid */
-  size_t    tmp_size;       /* amount of buffer[] free */
-  char      buffer[ 1024 ]; /* ptrs below index into this space */
-
-  int       protocol;    /* == 1 */
-  char    * name,
-          * lang,
-          * version,
-          * user,
-          * pass,
-          * auth_token;
+  NatsLogin user;
   char      prefix[ 16 ];
-  uint16_t  prefix_len;
+  char      buffer[ 256 ];
+  uint16_t  prefix_len,
+            session_len;
+  char      session[ MAX_SESSION_LEN ];
 
   EvNatsService( kv::EvPoll &p,  const uint8_t t,  EvNatsListen &l )
-    : kv::EvConnection( p, t ), sub_route( l.sub_route ) {}
+    : kv::EvConnection( p, t ), sub_route( l.sub_route ), listen( l ) {}
   void initialize_state( const char *pre,  size_t prelen ) {
     this->msg_ptr   = NULL;
     this->msg_len   = 0;
     this->msg_state = NATS_HDR_STATE;
 
-    this->verbose = true;
-    this->pedantic = this->tls_require = false;
-    this->echo = true;
+    this->subject = this->reply = this->sid = this->queue = NULL;
+    this->subject_len = this->reply_len = this->sid_len = this->queue_len = 0;
 
-    this->subject = this->reply = this->sid = NULL;
-    this->subject_len = this->reply_len = this->sid_len =
-    this->tmp_size = sizeof( this->buffer );
-
-    this->protocol = 1;
-    this->name = this->lang = this->version = NULL;
-    this->user = this->pass = this->auth_token = NULL;
+    this->user.release();
     this->prefix_len = prelen;
     ::memcpy( this->prefix, pre, prelen );
+    this->session_len = 0;
   }
-  /*HashData * resize_tab( HashData *curr,  size_t add_len );*/
-  char *save_string( const void *ptr,  size_t len ) {
-    if ( len <= this->tmp_size ) {
-      this->tmp_size -= len;
-      ::memcpy( &this->buffer[ this->tmp_size ], ptr, len );
-      return &this->buffer[ this->tmp_size ];
-    }
-    return NULL;
-  }
+  void set_session( const char *sess,  size_t sess_len ) noexcept;
   void add_sub( void ) noexcept;
   void rem_sid( uint64_t max_msgs ) noexcept;
   void rem_all_sub( void ) noexcept;
   bool fwd_pub( void ) noexcept;
-  bool fwd_msg( kv::EvPublish &pub,  const void *sid,  size_t sid_len ) noexcept;
+  bool fwd_msg( kv::EvPublish &pub,  NatsMsgTransform &xf ) noexcept;
   void parse_connect( const char *buf,  size_t sz ) noexcept;
+  bool on_inbox_reply( kv::EvPublish &pub ) noexcept;
   /* EvSocket */
   virtual void process( void ) noexcept;
   virtual void process_close( void ) noexcept;
@@ -105,6 +147,12 @@ struct EvNatsService : public kv::EvConnection {
   virtual bool on_msg( kv::EvPublish &pub ) noexcept;
   virtual uint8_t is_subscribed( const kv::NotifySub &sub ) noexcept;
   virtual uint8_t is_psubscribed( const kv::NotifyPattern &pat ) noexcept;
+  virtual size_t get_userid( char userid[ MAX_USERID_LEN ] ) noexcept;
+  virtual size_t get_session( const char *svc,  size_t svc_len,
+                              char session[ MAX_SESSION_LEN ] ) noexcept;
+  virtual size_t get_subscriptions( kv::SubRouteDB &subs,
+                                    kv::SubRouteDB &pats,
+                                    int &pattern_fmt ) noexcept;
 };
 
 /* presumes little endian, 0xdf masks out 0x20 for toupper() */
@@ -217,6 +265,9 @@ struct NatsArgs {
     return NULL;
   }
 };
+
+#define is_nats_debug kv_unlikely( nats_debug != 0 )
+extern uint32_t nats_debug;
 
 }
 }
