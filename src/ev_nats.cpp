@@ -726,8 +726,17 @@ EvNatsService::fwd_msg( EvPublish &pub,  NatsMsgTransform &xf ) noexcept
     replen -= preflen;
     rep     = &rep[ preflen ];
   }
-  xf.check_transform();
-
+  if ( ! xf.is_ready ) {
+    xf.is_ready = true;
+    if ( pub.pub_status != EV_PUB_NORMAL ) {
+      /* start and cycle are normal events */
+      if ( pub.pub_status <= EV_MAX_LOSS || pub.pub_status == EV_PUB_RESTART ) {
+        if ( this->notify != NULL )
+          this->notify->on_data_loss( *this, pub );
+      }
+    }
+    xf.check_transform();
+  }
   size_t msg_len_digits = uint64_digits( xf.msg_len );
   size_t len = 4 +                    /* MSG */
                sublen + 1 +           /* <subject> */

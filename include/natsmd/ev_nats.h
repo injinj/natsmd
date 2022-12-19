@@ -78,14 +78,9 @@ struct NatsMsgTransform {
       sid( id ), is_ready( false ) {}
 
   void check_transform( void ) {
-    if ( ! this->is_ready ) {
-      if ( this->msg_len == 0 || this->msg_enc == md::MD_STRING ) {
-        this->is_ready = true;
-        return;
-      }
-      this->transform();
-      this->is_ready = true;
-    }
+    if ( this->msg_len == 0 || this->msg_enc == md::MD_STRING )
+      return;
+    this->transform();
   }
   void transform( void ) noexcept;
 };
