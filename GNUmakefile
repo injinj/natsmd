@@ -239,6 +239,30 @@ $(bind)/test_map: $(test_map_objs) $(test_map_libs) $(lnk_dep)
 all_exes    += $(bind)/test_map
 all_depends += $(test_map_deps)
 
+natsmd_client_files := md_client
+natsmd_client_cfile := $(addprefix src/, $(addsuffix .cpp, $(natsmd_client_files)))
+natsmd_client_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(natsmd_client_files)))
+natsmd_client_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(natsmd_client_files)))
+natsmd_client_libs  := $(natsmd_lib)
+natsmd_client_lnk   := $(natsmd_lib) $(lnk_lib)
+
+$(bind)/natsmd_client: $(natsmd_client_objs) $(natsmd_client_libs) $(lnk_dep)
+
+all_exes    += $(bind)/natsmd_client
+all_depends += $(natsmd_client_deps)
+
+natsmd_pub_files := md_pub
+natsmd_pub_cfile := $(addprefix src/, $(addsuffix .cpp, $(natsmd_pub_files)))
+natsmd_pub_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(natsmd_pub_files)))
+natsmd_pub_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(natsmd_pub_files)))
+natsmd_pub_libs  := $(natsmd_lib)
+natsmd_pub_lnk   := $(natsmd_lib) $(lnk_lib)
+
+$(bind)/natsmd_pub: $(natsmd_pub_objs) $(natsmd_pub_libs) $(lnk_dep)
+
+all_exes    += $(bind)/natsmd_pub
+all_depends += $(natsmd_pub_deps)
+
 all_dirs := $(bind) $(libd) $(objd) $(dependd)
 
 # the default targets
@@ -323,6 +347,8 @@ CMakeLists.txt: .copr/Makefile
 	endif ()
 	add_definitions(-DNATSMD_VER=$(ver_build))
 	add_executable (natsmd_server $(natsmd_server_cfile))
+	add_executable (natsmd_client $(natsmd_client_cfile))
+	add_executable (natsmd_pub $(natsmd_pub_cfile))
 	add_executable (test_map $(test_map_cfile))
 	EOF
 
@@ -365,9 +391,11 @@ $(dependd)/depend.make: $(dependd) $(all_depends)
 	@cat $(all_depends) >> $(dependd)/depend.make
 
 .PHONY: dist_bins
-dist_bins: $(all_libs) $(all_dlls) $(bind)/natsmd_server $(bind)/ping_nats
+dist_bins: $(all_libs) $(all_dlls) $(bind)/natsmd_server $(bind)/natsmd_client $(bind)/natsmd_pub $(bind)/ping_nats
 	chrpath -d $(libd)/libnatsmd.so
 	chrpath -d $(bind)/natsmd_server
+	chrpath -d $(bind)/natsmd_client
+	chrpath -d $(bind)/natsmd_pub
 	chrpath -d $(bind)/ping_nats
 
 .PHONY: dist_rpm

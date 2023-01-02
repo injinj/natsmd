@@ -76,8 +76,10 @@ EvNatsListen::listen( const char *ip,  int port,  int opts ) noexcept
 /* ID = 22 chars base62 string dependent on the hash of the database = 255 */
 static char nats_server_info[] =
 "INFO {\"server_id\":\"______________________\","
-      "\"version\":\"1.1.1\",\"go\":\"go1.5.0\","
-      "\"host\":\"255.255.255.255\",\"port\":65535,"
+      "\"version\":\"2\","
+      "\"proto\":1,"
+      "\"host\":\"255.255.255.255\","
+      "\"port\":65535,"
       "\"auth_required\":false,\"ssl_required\":false,"
       "\"tls_required\":false,\"tls_verify\":false,"
       "\"max_payload\":1048576}\r\n";
@@ -105,27 +107,31 @@ init_server_info( uint64_t h1,  uint64_t h2,  uint16_t port )
     r >>= 6;
   }
 
+  char * ip, * s;
+  size_t len;
   if ( ::gethostname( host, sizeof( host ) ) == 0 &&
        ::getaddrinfo( host, NULL, NULL, &res ) == 0 ) {
     for ( p = res; p != NULL; p = p->ai_next ) {
       if ( p->ai_family == AF_INET && p->ai_addr != NULL ) {
-        char *ip = ::inet_ntoa( ((struct sockaddr_in *) p->ai_addr)->sin_addr );
-        size_t len = ::strlen( ip );
-        ::memcpy( &nats_server_info[ 84 ], ip, len );
-        nats_server_info[ 84 + len++ ] = '\"';
-        nats_server_info[ 84 + len++ ] = ',';
+        ip  = ::inet_ntoa( ((struct sockaddr_in *) p->ai_addr)->sin_addr );
+        len = ::strlen( ip );
+        s   = ::strstr( nats_server_info, "255.255.255.255" );
+        ::memcpy( s, ip, len );
+        s[ len++ ] = '\"';
+        s[ len++ ] = ',';
         while ( len < 17 )
-          nats_server_info[ 84 + len++ ] = ' ';
+          s[ len++ ] = ' ';
         break;
       }
     }
     ::freeaddrinfo( res );
   }
 
-  for ( i = 0; port > 0; port /= 10 ) 
-    nats_server_info[ 112 - i++ ] = ( port % 10 ) + '0';
-  while ( i < 5 )
-    nats_server_info[ 112 - i++ ] = ' ';
+  s = ::strstr( nats_server_info, "65535" );
+  for ( i = 5; port > 0; port /= 10 ) 
+    s[ --i ] = ( port % 10 ) + '0';
+  while ( i > 0 )
+    s[ --i ] = ' ';
   is_server_info_init = true;
 }
 
@@ -165,220 +171,247 @@ EvNatsListen::accept( void ) noexcept
     h2 = /*this->poll.map->hdr.seed[ 0 ].hash2;*/ 0;
     init_server_info( h1, h2, port );
   }
-  c->initialize_state( NULL, 0 );
+  c->initialize_state( NULL, 0, ++this->timer_id );
   c->append_iov( nats_server_info, sizeof( nats_server_info ) - 1 );
   c->idle_push( EV_WRITE_HI );
   return c;
 }
-
+#if 0
+  if ( this->user.stamp == 0 ) {
+    switch ( kw ) {
+      case NATS_KW_SUB1:
+      case NATS_KW_SUB2:
+      case NATS_KW_PUB1:
+      case NATS_KW_PUB2:
+      case NATS_KW_UNSUB:
+      case NATS_KW_PING: /* setup user if none specified */
+        return IS_CONNECT;
+        break;
+      default:
+        break;
+    }
+  }
+#endif
 void
 EvNatsService::process( void ) noexcept
 {
-  enum { DO_OK = 1, DO_ERR = 2, NEED_MORE = 4, FLOW_BACKPRESSURE = 8,
-         HAS_PING = 16 };
   static const char ok[]   = "+OK\r\n",
                     err[]  = "-ERR\r\n",
                     pong[] = "PONG\r\n";
-  size_t            buflen, used, linesz, nargs, size_len, max_msgs;
-  char            * p, * eol, * start, * end, * size_start;
-  NatsArgs          args;
-  int               fl, verb_ok/*, cmd_cnt, msg_cnt*/;
+  const int verb_ok = ( this->user.verbose ? DO_OK : 0 );
+  int flow;
 
-  for (;;) { 
-    buflen = this->len - this->off;
-    if ( buflen == 0 )
-      goto break_loop;
+  for (;;) {
+    if ( this->off == this->len )
+      break;
 
-    start = &this->recv[ this->off ];
-    end   = &start[ buflen ];
+    NatsMsg msg;
+    int fl = msg.parse_msg( &this->recv[ this->off ], &this->recv[ this->len ]);
+    if ( fl == NEED_MORE )
+      break;
 
-    used    = 0;
-    fl      = 0;
-    /*cmd_cnt = 0;*/
-    /*msg_cnt = 0;*/
-    verb_ok = ( this->user.verbose ? DO_OK : 0 );
-    /* decode nats hdrs */
-    for ( p = start; p < end; ) {
-      if ( this->msg_state == NATS_HDR_STATE ) {
-        eol = (char *) ::memchr( &p[ 1 ], '\n', end - &p[ 1 ] );
-        if ( eol != NULL ) {
-          linesz = &eol[ 1 ] - p;
-          if ( linesz > 3 ) {
-            uint32_t kw = unaligned<uint32_t>( p ) & 0xdfdfdfdf; /* 4 toupper */
-            if ( this->user.stamp == 0 ) {
-              switch ( kw ) {
-                case NATS_KW_SUB1:
-                case NATS_KW_SUB2:
-                case NATS_KW_PUB1:
-                case NATS_KW_PUB2:
-                case NATS_KW_UNSUB:
-                case NATS_KW_PING: /* setup user if none specified */
-                  this->parse_connect( NULL, 0 );
-                  break;
-                default:
-                  break;
-              }
-            }
-            switch ( kw ) {
-            /*case NATS_KW_OK1:     // client side only
-              case NATS_KW_OK2:     break;
-              case NATS_KW_MSG1:   // MSG <subject> <sid> [reply] <size>
-              case NATS_KW_MSG2:    break;
-              case NATS_KW_ERR:     break; */
-              case NATS_KW_SUB1:   /* SUB <subject> [queue group] <sid> */
-              case NATS_KW_SUB2:
-                nargs = args.parse( &p[ 4 ], eol );
-                if ( nargs != 2 ) {
-                  if ( nargs != 3 ) {
-                    fl |= DO_ERR;
-                    break;
-                  }
-                  /* SUB <subject> <queue> <sid> */
-                  this->subject     = args.ptr[ 0 ];
-                  this->queue       = args.ptr[ 1 ];
-                  this->sid         = args.ptr[ 2 ];
-                  this->subject_len = args.len[ 0 ];
-                  this->queue_len   = args.len[ 1 ];
-                  this->sid_len     = args.len[ 2 ];
-                }
-                else {
-                  /* SUB <subject> <sid> */
-                  this->subject     = args.ptr[ 0 ];
-                  this->queue       = NULL;
-                  this->sid         = args.ptr[ 1 ];
-                  this->subject_len = args.len[ 0 ];
-                  this->queue_len   = 0;
-                  this->sid_len     = args.len[ 1 ];
-                }
-                this->add_sub();
-                fl |= verb_ok;
-                break;
-              case NATS_KW_PUB1:   /* PUB <subject> [reply] <size> */
-              case NATS_KW_PUB2:
-                size_start = args.parse_end_size( p, eol - 1, this->msg_len,
-                                                  size_len );
-                if ( size_start == NULL ) {
-                  fl |= DO_ERR;
-                  break;
-                }
-                if ( linesz <= sizeof( this->buffer ) ) {
-                  ::memcpy( this->buffer, p, linesz );
-                  size_start = &this->buffer[ size_start - p ];
-                  p = this->buffer;
-                }
-                else {
-                  char *tmp = this->alloc( linesz );
-                  ::memcpy( tmp, p, linesz );
-                  size_start = &tmp[ size_start - p ];
-                  p = tmp;
-                }
-                nargs = args.parse( &p[ 4 ], size_start );
-                if ( nargs < 1 || nargs > 2 ) {
-                  fl |= DO_ERR;
-                  break;
-                }
-                this->subject     = args.ptr[ 0 ];
-                this->subject_len = args.len[ 0 ];
-                if ( nargs > 1 ) {
-                  this->reply     = args.ptr[ 1 ];
-                  this->reply_len = args.len[ 1 ];
-                }
-                else {
-                  this->reply     = NULL;
-                  this->reply_len = 0;
-                }
-                this->msg_state = NATS_PUB_STATE;
-                break;
-              case NATS_KW_PING:
-                this->append( pong, sizeof( pong ) - 1 );
-                fl |= HAS_PING;
-                break;
-            /*case NATS_KW_PONG:    break;
-              case NATS_KW_INFO:    break;*/
-              case NATS_KW_UNSUB: /* UNSUB <sid> [max-msgs] */
-                nargs = args.parse( &p[ 6 ], eol );
-                if ( nargs != 1 ) {
-                  if ( nargs != 2 ) {
-                    fl |= DO_ERR;
-                    break;
-                  }
-                  args.parse_end_size( args.ptr[ 1 ],
-                                       &args.ptr[ 1 ][ args.len[ 1 ] ],
-                                       max_msgs, size_len );
-                }
-                else {
-                  max_msgs = 0;
-                }
-                this->sid         = args.ptr[ 0 ];
-                this->sid_len     = args.len[ 0 ];
-                this->subject     = NULL;
-                this->subject_len = 0;
-                this->rem_sid( max_msgs );
-                fl |= verb_ok;
-                break;
-              case NATS_KW_CONNECT:
-                this->parse_connect( p, linesz );
-                break;
-              default:
-                break;
-            }
-          }
-          p = &eol[ 1 ];
-          used += linesz;
-          /*cmd_cnt++;*/
-        }
-        else { /* no end of line */
-          fl |= NEED_MORE;
-        }
-      }
-      else { /* msg_state == NATS_PUB_STATE */
-        if ( (size_t) ( end - p ) >= this->msg_len ) {
-          this->msg_ptr = p;
-          p = &p[ this->msg_len ];
-          used += this->msg_len;
-          this->msg_state = NATS_HDR_STATE;
-          /* eat trailing crlf */
-          while ( p < end && ( *p == '\r' || *p == '\n' ) ) {
-            p++;
-            used++;
-          }
-          if ( verb_ok == DO_OK )
-            this->append( ok, sizeof( ok ) - 1 );
-          if ( ! this->fwd_pub() )
-            fl |= FLOW_BACKPRESSURE;
-          /*fl |= verb_ok;*/
-          /*msg_cnt++;*/
-        }
-        else { /* not enough to consume message */
-          fl |= NEED_MORE;
-        }
-      }
-      if ( ( fl & NEED_MORE ) != 0 ) {
-        this->pushpop( EV_READ, EV_READ_LO );
+    if ( this->user.stamp == 0 && fl <= REM_SID )
+      this->parse_connect( NULL, 0 );
+
+    switch ( fl ) {
+      case IS_CONNECT:
+        this->parse_connect( msg.line, msg.size );
         break;
-      }
-      if ( ( fl & DO_OK ) != 0 )
-        this->append( ok, sizeof( ok ) - 1 );
-      if ( ( fl & DO_ERR ) != 0 )
-        this->append( err, sizeof( err ) - 1 );
-      if ( ( fl & ( FLOW_BACKPRESSURE | HAS_PING ) ) != 0 ) {
-        this->off += (uint32_t) used;
-        if ( this->pending() > 0 )
-          this->push( EV_WRITE_HI );
-        if ( this->test( EV_READ ) )
-          this->pushpop( EV_READ_LO, EV_READ );
+
+      case ADD_SUB:
+        this->add_sub( msg );
+        fl |= verb_ok;
+        break;
+
+      case PUB_MSG:
+      case HPUB_MSG:
+        flow = this->fwd_pub( msg );
+        if ( flow == NATS_FLOW_GOOD )
+          this->nats_state &= ~NATS_BACKPRESSURE;
+        else {
+          this->nats_state |= NATS_BACKPRESSURE;
+          fl |= FLOW_BACKPRESSURE;
+          if ( flow == NATS_FLOW_STALLED )
+            goto skip_backpressure;
+        }
+        fl |= verb_ok;
+        break;
+
+      case IS_PING:
+        this->append( pong, sizeof( pong ) - 1 );
+        this->off += msg.size;
+        this->push( EV_WRITE_HI );
         return;
-      }
-      fl = 0;
+
+      case REM_SID:
+        this->rem_sid( msg );
+        fl |= verb_ok;
+        break;
+
+      default:
+        break;
     }
-    this->off += (uint32_t) used;
-    if ( used == 0 || ( fl & NEED_MORE ) != 0 )
-      goto break_loop;
+    this->off += msg.size;
+
+    if ( ( fl & DO_OK ) != 0 )
+      this->append( ok, sizeof( ok ) - 1 );
+    if ( ( fl & DO_ERR ) != 0 )
+      this->append( err, sizeof( err ) - 1 );
+    if ( ( fl & FLOW_BACKPRESSURE ) != 0 )
+      goto backpressure;
   }
-break_loop:;
   this->pop( EV_PROCESS );
-  this->push_write();
+  if ( ! this->push_write() )
+    this->StreamBuf::reset();
   return;
+
+skip_backpressure:;
+  this->pop( EV_PROCESS );
+  this->pop3( EV_READ, EV_READ_LO, EV_READ_HI );
+backpressure:;
+  if ( ! this->push_write_high() )
+    this->StreamBuf::reset();
+}
+
+int
+NatsMsg::parse_msg( char *start,  char *end ) noexcept
+{
+  char * eol    = (char *) ::memchr( start, '\n', end - start );
+  char * size_start, * p;
+  size_t linesz, nargs, size_len;
+  int    pub_type;
+
+  if ( eol == NULL )
+    return NEED_MORE;
+
+  linesz     = &eol[ 1 ] - start; /* 1 char after \n */
+  this->line = start;
+  this->size = linesz;
+  p          = &start[ linesz ];
+
+  if ( linesz < 4 ) /* skip over empty lines */
+    return SKIP_SPACE;
+
+  NatsArgs args;
+  this->kw = unaligned<uint32_t>( start ) & 0xdfdfdfdf; /* 4 toupper */
+
+  switch ( this->kw ) {
+    case NATS_KW_OK1:
+    case NATS_KW_OK2:
+      return IS_OK;
+
+    case NATS_KW_ERR:
+      return IS_ERR;
+
+    case NATS_KW_SUB1:   /* SUB <subject> [queue group] <sid> */
+    case NATS_KW_SUB2:
+      nargs = args.parse( &start[ 4 ], eol );
+      if ( nargs < 2 || nargs > 3 )
+        return DO_ERR;
+
+      /* SUB <subject> <queue> <sid> | SUB <subject> <sid> */
+      this->subject     = args.ptr[ 0 ];
+      this->subject_len = args.len[ 0 ];
+      this->sid         = args.ptr[ nargs - 1 ];
+      this->sid_len     = args.len[ nargs - 1 ];
+
+      if ( nargs == 3 ) {
+        this->queue     = args.ptr[ 1 ];
+        this->queue_len = args.len[ 1 ];
+      }
+      return ADD_SUB;
+
+    case NATS_KW_MSG1:   /* MSG <subject> <sid> [reply] <size> */
+    case NATS_KW_MSG2:
+      pub_type = RCV_MSG;
+      if ( 0 ) {
+      /* FALLTHRU */
+    case NATS_KW_PUB1:   /* PUB <subject> [reply] <size> */
+    case NATS_KW_PUB2:
+        pub_type = PUB_MSG;
+        if ( 0 ) {
+      /* FALLTHRU */
+    case NATS_KW_HPUB:   /* HPUB <subject> [reply] <hsize> <size> */
+          pub_type = HPUB_MSG;
+          if ( 0 ) {
+      /* FALLTHRU */
+    case NATS_KW_HMSG:   /* HMSG <subject> <sid> [reply] <hsize> <size> */
+            pub_type = HRCV_MSG;
+          }
+        }
+      }
+      size_start = args.parse_end_size( start, eol - 1, this->msg_len,
+                                        size_len );
+      if ( size_start == NULL )
+        return DO_ERR;
+      if ( pub_type == HPUB_MSG || pub_type == HRCV_MSG ) {
+        size_start = args.parse_end_size( start, size_start, this->hdr_len,
+                                          size_len );
+        if ( size_start == NULL || this->hdr_len > this->msg_len )
+          return DO_ERR;
+      }
+      this->msg_ptr = p;
+      p = &p[ this->msg_len ];
+      if ( p > end )
+        return NEED_MORE;
+
+      nargs = args.parse( &start[ 4 ], size_start );
+      if ( nargs < 1 || nargs > 3 )
+        return DO_ERR;
+      /* PUB <subject> [reply] | MSG <subject> <sid> [reply] */
+      this->subject     = args.ptr[ 0 ];
+      this->subject_len = args.len[ 0 ];
+      if ( pub_type == PUB_MSG || pub_type == HPUB_MSG ) {
+        if ( nargs > 1 ) {
+          this->reply     = args.ptr[ 1 ];
+          this->reply_len = args.len[ 1 ];
+        }
+      }
+      else {
+        if ( nargs == 1 ) /* must have sid */
+          return DO_ERR;
+        this->sid     = args.ptr[ 1 ];
+        this->sid_len = args.len[ 1 ];
+        if ( nargs > 2 ) {
+          this->reply     = args.ptr[ 2 ];
+          this->reply_len = args.len[ 2 ];
+        }
+      }
+      this->size += this->msg_len;
+      while ( p < end && ( *p == '\r' || *p == '\n' ) ) {
+        p++;
+        this->size++;
+      }
+      return pub_type;
+
+    case NATS_KW_PING:
+      return IS_PING;
+
+    case NATS_KW_PONG:
+      return IS_PONG;
+
+    case NATS_KW_INFO:
+      return IS_INFO;
+
+    case NATS_KW_UNSUB: /* UNSUB <sid> [max-msgs] */
+      nargs = args.parse( &start[ 6 ], eol - 1 );
+      if ( nargs != 1 ) {
+        if ( nargs != 2 )
+          return DO_ERR;
+        /* max-msgs */
+        args.parse_end_size( args.ptr[ 1 ], &args.ptr[ 1 ][ args.len[ 1 ] ],
+                             this->max_msgs, size_len );
+      }
+      this->sid     = args.ptr[ 0 ];
+      this->sid_len = args.len[ 0 ];
+      return REM_SID;
+
+    case NATS_KW_CONNECT:
+      return IS_CONNECT;
+
+    default:
+      return DO_ERR;
+  }
 }
 
 uint8_t
@@ -427,10 +460,10 @@ EvNatsService::is_psubscribed( const NotifyPattern &pat ) noexcept
 }
 
 void
-EvNatsService::add_sub( void ) noexcept
+EvNatsService::add_sub( NatsMsg &msg ) noexcept
 {
-  const char * sub       = this->subject;
-  size_t       sublen    = this->subject_len,
+  const char * sub       = msg.subject;
+  size_t       sublen    = msg.subject_len,
                preflen   = this->prefix_len;
   char       * inbox     = NULL;
   size_t       inbox_len = 0;
@@ -442,14 +475,14 @@ EvNatsService::add_sub( void ) noexcept
     sublen += preflen;
   }
 
-  NatsStr sid( this->sid, this->sid_len );
+  NatsStr sid( msg.sid, msg.sid_len );
   NatsStr subj( sub, sublen );
   bool    coll = false;
   NatsSubStatus status;
 
   if ( is_nats_debug )
     printf( "add_sub %.*s sid %.*s\n", (int) sublen, sub,
-            (int) this->sid_len, this->sid );
+            (int) msg.sid_len, msg.sid );
 
   if ( subj.is_wild() ) {
     PatternCvt cvt;
@@ -477,10 +510,10 @@ EvNatsService::add_sub( void ) noexcept
   else {
     if ( this->session_len > 0 ) {
       CatPtr ibx( this->alloc_temp( preflen + 7 + this->session_len + 1 +
-                                    this->sid_len + 1 ) );
+                                    msg.sid_len + 1 ) );
       ibx.x( this->prefix, preflen ).s( "_INBOX." )
          .x( this->session, this->session_len ).c( '.' )
-         .x( this->sid, this->sid_len ).end();
+         .x( msg.sid, msg.sid_len ).end();
 
       inbox     = ibx.start;
       inbox_len = ibx.len();
@@ -507,14 +540,14 @@ EvNatsService::add_sub( void ) noexcept
 }
 
 void
-EvNatsService::rem_sid( uint64_t max_msgs ) noexcept
+EvNatsService::rem_sid( NatsMsg &msg ) noexcept
 {
-  NatsStr       sid( this->sid, this->sid_len );
+  NatsStr       sid( msg.sid, msg.sid_len );
   NatsLookup    look;
   NatsSubStatus status;
   bool          coll = false;
 
-  status = map.unsub( sid, max_msgs, look, coll );
+  status = map.unsub( sid, msg.max_msgs, look, coll );
   if ( status == NATS_EXPIRED ) {
     if ( look.rt != NULL ) {
       NotifySub nsub( look.rt->value, look.rt->subj_len, look.hash, this->fd,
@@ -560,14 +593,14 @@ EvNatsService::rem_all_sub( void ) noexcept
   }
 }
 
-bool
-EvNatsService::fwd_pub( void ) noexcept
+int
+EvNatsService::fwd_pub( NatsMsg &msg ) noexcept
 {
-  size_t    preflen = this->prefix_len;
-  const char  * sub = this->subject,
-              * rep = this->reply;
-  size_t     sublen = this->subject_len,
-             replen = this->reply_len;
+  size_t   preflen = this->prefix_len;
+  const char * sub = msg.subject,
+             * rep = msg.reply;
+  size_t    sublen = msg.subject_len,
+            replen = msg.reply_len;
   if ( preflen > 0 ) {
     CatPtr tmp( this->alloc_temp( sublen + preflen ) );
     tmp.x( this->prefix, preflen ).x( sub, sublen );
@@ -582,10 +615,20 @@ EvNatsService::fwd_pub( void ) noexcept
   }
   uint32_t  h = kv_crc_c( sub, sublen, 0 );
   EvPublish pub( sub, sublen, rep, replen,
-                 this->msg_ptr, this->msg_len,
+                 msg.msg_ptr, msg.msg_len,
                  this->sub_route, this->fd, h,
                  MD_STRING, 'p' );
-  return this->sub_route.forward_msg( pub );
+  pub.hdr_len = msg.hdr_len;
+  BPData * data = NULL;
+  if ( ( this->nats_state & NATS_BACKPRESSURE ) != 0 ) {
+    data = this;
+    this->bp_flags = ( this->bp_flags & ~BP_FORWARD ) | BP_NOTIFY;
+  }
+  if ( this->sub_route.forward_msg( pub, data ) )
+    return NATS_FLOW_GOOD;
+  if ( ! this->bp_in_list() )
+    return NATS_FLOW_BACKPRESSURE;
+  return NATS_FLOW_STALLED;
 }
 
 bool
@@ -735,23 +778,43 @@ EvNatsService::fwd_msg( EvPublish &pub,  NatsMsgTransform &xf ) noexcept
           this->notify->on_data_loss( *this, pub );
       }
     }
-    xf.check_transform();
+    xf.check_transform( this->user.binary );
   }
-  size_t msg_len_digits = uint64_digits( xf.msg_len );
-  size_t len = 4 +                    /* MSG */
-               sublen + 1 +           /* <subject> */
-               sid_len + 1 +          /* <sid> */
-    ( replen > 0 ? replen + 1 : 0 ) + /* [reply] */
-               msg_len_digits + 2 +   /* <size> \r\n */
-               xf.msg_len + 2;        /* <blob> \r\n */
+  size_t msg_len_digits = uint64_digits( xf.msg_len + xf.hdr_len ),
+         hdr_len_digits = 0,
+         len;
+
+  len = sublen + 1 +           /* <subject> */
+        sid_len + 1 +          /* <sid> */
+        ( replen > 0 ? replen + 1 : 0 ) + /* [reply] */
+        msg_len_digits + 2 +   /* <size> \r\n */
+        xf.msg_len + 2;        /* <blob> \r\n */
+
+  if ( xf.hdr_len == 0 ) {
+    len += 4; /* MSG */
+  }
+  else {
+    hdr_len_digits = uint64_digits( xf.hdr_len );
+    len += 5 +                  /* HMSG */
+           hdr_len_digits + 1 + /* <hsize> */
+           xf.hdr_len;
+  }
   CatPtr p( this->alloc( len ) );
 
-  p.s( "MSG " ).x( sub, sublen ).c( ' ' )
-               .x( sid, sid_len ).c( ' ' );
+  if ( xf.hdr_len == 0 )
+    p.s( "MSG " );
+  else
+    p.s( "HMSG " );
+  p.x( sub, sublen ).c( ' ' )
+   .x( sid, sid_len ).c( ' ' );
   if ( replen > 0 )
     p.x( rep, replen ).c( ' ' );
-  p.u( xf.msg_len, msg_len_digits ).s( "\r\n" )
-   .b( xf.msg, xf.msg_len ).s( "\r\n" );
+  if ( xf.hdr_len > 0 )
+    p.u( xf.hdr_len, hdr_len_digits ).s( " " );
+  p.u( xf.msg_len + xf.hdr_len, msg_len_digits ).s( "\r\n" );
+  if ( xf.hdr_len > 0 )
+    p.b( xf.hdr, xf.hdr_len );
+  p.b( xf.msg, xf.msg_len ).s( "\r\n" );
 
   this->sz += len;
   return this->idle_push_write();
@@ -784,19 +847,45 @@ EvNatsService::process_close( void ) noexcept
 void
 EvNatsService::release( void ) noexcept
 {
-  //printf( "nats release fd=%d\n", this->fd );
+  if ( ( this->nats_state & NATS_HAS_TIMER ) != 0 )
+    this->poll.timer.remove_timer( this->fd, this->timer_id, 0 );
+  if ( this->bp_in_list() )
+    this->bp_retire( *this );
   this->rem_all_sub();
   this->map.release();
-  this->EvConnection::release_buffers();
   if ( this->notify != NULL )
     this->notify->on_shutdown( *this, NULL, 0 );
+  this->EvConnection::release_buffers();
   this->user.release();
+  this->timer_id = 0;
 }
 
 bool
-EvNatsService::timer_expire( uint64_t, uint64_t ) noexcept
+EvNatsService::timer_expire( uint64_t tid, uint64_t ) noexcept
 {
+  if ( tid == this->timer_id ) {
+    this->nats_state &= ~NATS_HAS_TIMER;
+    this->push( EV_PROCESS );
+    this->idle_push( EV_READ_LO );
+  }
   return false;
+}
+
+void
+EvNatsService::on_write_ready( void ) noexcept
+{
+  this->push( EV_PROCESS );
+  this->idle_push( EV_READ_LO );
+}
+
+void
+EvNatsService::read( void ) noexcept
+{
+  if ( ! this->bp_in_list() ) {
+    this->EvConnection::read();
+    return;
+  }
+  this->pop3( EV_READ, EV_READ_HI, EV_READ_LO );
 }
 
 size_t
@@ -828,16 +917,13 @@ EvNatsService::set_session( const char *sess,  size_t sess_len ) noexcept
 
   inbox.s( "_INBOX." ).x( sess, sess_len ).s( ".>" ).end();
 
-  this->subject     = inbox.buf;
-  this->subject_len = inbox.len();
-  this->sid         = inbox_sid;
-  this->sid_len     = 1;
-  this->reply       = NULL;
-  this->reply_len   = 0;
-  this->queue       = NULL;
-  this->queue_len   = 0;
+  NatsMsg msg;
+  msg.subject     = inbox.buf;
+  msg.subject_len = inbox.len();
+  msg.sid         = inbox_sid;
+  msg.sid_len     = 1;
 
-  this->add_sub();
+  this->add_sub( msg );
 }
 
 size_t
@@ -910,6 +996,9 @@ EvNatsService::parse_connect( const char *buf,  size_t bufsz ) noexcept
 
   if ( bufsz == 0 )
     goto do_notify;
+  else if ( is_nats_debug )
+    printf( "%.*s", (int) bufsz, buf );
+
   if ( (start = (const char *) ::memchr( buf, '{', bufsz )) == NULL )
     goto do_notify;
   bufsz -= start - buf;
@@ -949,6 +1038,18 @@ EvNatsService::parse_connect( const char *buf,  size_t bufsz ) noexcept
         case NATS_JS_ECHO: /* echo:false */
           if ( iter->get_reference( mref ) == 0 && mref.ftype == MD_BOOLEAN )
             this->user.echo = ( mref.fptr[ 0 ] != 0 );
+          break;
+        case NATS_JS_HEADERS: /* headers:false */
+          if ( iter->get_reference( mref ) == 0 && mref.ftype == MD_BOOLEAN )
+            this->user.headers = ( mref.fptr[ 0 ] != 0 );
+          break;
+        case NATS_JS_NO_RESPOND: /* no_responders:false */
+          if ( iter->get_reference( mref ) == 0 && mref.ftype == MD_BOOLEAN )
+            this->user.no_responders = ( mref.fptr[ 0 ] != 0 );
+          break;
+        case NATS_JS_BINARY: /* nary:false */
+          if ( iter->get_reference( mref ) == 0 && mref.ftype == MD_BOOLEAN )
+            this->user.binary = ( mref.fptr[ 0 ] != 0 );
           break;
         case NATS_JS_PROTOCOL: /* proto:1 */
           if ( iter->get_reference( mref ) == 0 )

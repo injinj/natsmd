@@ -13,19 +13,21 @@ namespace rai {
 namespace natsmd {
 
 struct NatsLogin {
-  uint64_t stamp;       /* time of login */
-  bool     verbose,     /* whether +OK is sent */
-           pedantic,    /* whether subject is checked for validity */
-           tls_require, /* whether need TLS layer */
-           echo;        /* whether to forward pubs to subs owned by client
-                         (eg. multicast loopback) */
-  int      protocol;    /* == 1 */
-  char   * name,        /* connect parameters user:"str" */
-         * lang,        /*                    lang:"C" */
-         * version,     /*                    version:"1.1" */
-         * user,        /*                    user:"str" */
-         * pass,        /*                    pass:"str" */
-         * auth_token;  /*                    auth_token:"str" */
+  uint64_t stamp;         /* time of login */
+  bool     verbose,       /* whether +OK is sent */
+           pedantic,      /* whether subject is checked for validity */
+           tls_require,   /* whether need TLS layer */
+           echo,          /* whether to forward pubs to subs owned by client */
+           headers,       /* */
+           no_responders, /* */
+           binary;
+  int      protocol;      /* == 1 */
+  char   * name,          /* connect parameters user:"str" */
+         * lang,          /*                    lang:"C" */
+         * version,       /*                    version:"1.1" */
+         * user,          /*                    user:"str" */
+         * pass,          /*                    pass:"str" */
+         * auth_token;    /*                    auth_token:"str" */
   NatsLogin() {
     ::memset( (void *) this, 0, sizeof( *this ) );
     this->protocol = 1;
@@ -60,76 +62,114 @@ struct EvNatsListen : public kv::EvTcpListen {
 
 struct EvPrefetchQueue;
 
-enum NatsState {
-  NATS_HDR_STATE = 0, /* parsing header opcode */
-  NATS_PUB_STATE = 1  /* parsing PUB message bytes */
-};
-
 struct NatsMsgTransform {
   md::MDMsgMem spc;
-  const void * msg;
+  const void * msg,
+             * hdr;
   uint32_t     msg_len,
+               hdr_len,
                msg_enc;
   NatsStr    & sid;
   bool         is_ready;
 
   NatsMsgTransform( kv::EvPublish &pub,  NatsStr &id )
-    : msg( pub.msg ), msg_len( pub.msg_len ), msg_enc( pub.msg_enc ),
-      sid( id ), is_ready( false ) {}
+    : msg( pub.msg ), hdr( 0 ), msg_len( pub.msg_len ), hdr_len( pub.hdr_len ),
+      msg_enc( pub.msg_enc ), sid( id ), is_ready( false ) {
+    if ( pub.hdr_len > 0 ) {
+      this->hdr = this->msg;
+      this->msg = &((const char *) this->msg)[ pub.hdr_len ];
+      this->msg_len -= pub.hdr_len;
+    }
+  }
 
-  void check_transform( void ) {
-    if ( this->msg_len == 0 || this->msg_enc == md::MD_STRING )
+  void check_transform( bool bin ) {
+    if ( bin || this->msg_len == 0 || this->msg_enc == md::MD_STRING )
       return;
     this->transform();
   }
   void transform( void ) noexcept;
 };
 
-struct EvNatsService : public kv::EvConnection {
+enum {
+  ADD_SUB           = 0,
+  PUB_MSG           = 1,
+  HPUB_MSG          = 2,
+  RCV_MSG           = 3,
+  HRCV_MSG          = 4,
+  REM_SID           = 5,
+  NEED_MORE         = 6,
+  IS_CONNECT        = 7,
+  IS_OK             = 8,
+  IS_ERR            = 9,
+  IS_PING           = 10,
+  IS_PONG           = 11,
+  SKIP_SPACE        = 12,
+  IS_INFO           = 13,
+
+  DO_ERR            = 32,
+  DO_OK             = 64,
+  FLOW_BACKPRESSURE = 128
+};
+
+struct NatsMsg {
+  uint32_t   kw,            /* NATS_KW_... */
+             subject_len,   /* size of subject */
+             reply_len,     /* size of reply */
+             sid_len,       /* size of sid */
+             queue_len;     /* size of queue */
+  size_t     size;          /* size of message */
+  uint64_t   msg_len,       /* size of msg_ptr for publish */
+             hdr_len,       /* size of hdrs */
+             max_msgs;      /* unsub param */
+  char     * line,          /* first line */
+           * msg_ptr,       /* PUB <subject> [reply] <size>\r\n<msg> */
+           * subject,       /* either pub or sub subject */
+           * reply,         /* pub reply */
+           * sid,           /* SUB <subject> [queue] <sid> */
+           * queue;         /* queue of sub */
+
+  NatsMsg() {
+    ::memset( (void *) this, 0, sizeof( *this ) );
+  }
+  int parse_msg( char *start,  char *end ) noexcept;
+};
+
+enum NatsState { /* msg_state */
+  NATS_HAS_TIMER    = 1, /* timer running */
+  NATS_BACKPRESSURE = 2  /* backpressure */
+};
+
+struct EvNatsService : public kv::EvConnection, public kv::BPData {
   void * operator new( size_t, void *ptr ) { return ptr; }
   kv::RoutePublish & sub_route;
   EvNatsListen     & listen;
 
   NatsSubMap map;
-  char     * msg_ptr;     /* ptr to the msg blob */
-  size_t     msg_len;     /* size of the current message blob */
-  NatsState  msg_state;   /* ascii hdr mode or binary blob mode */
-  char     * subject;     /* either pub or sub subject w/opt reply: */
-  size_t     subject_len; /* PUB <subject> <reply> */
-  char     * reply;       /* SUB <subject> <sid> */
-  size_t     reply_len;   /* len of reply */
-  char     * sid;         /* <sid> of SUB */
-  size_t     sid_len;     /* len of sid */
-  char     * queue;
-  size_t     queue_len;
-
-  NatsLogin user;
-  char      prefix[ 16 ];
-  char      buffer[ 256 ];
-  uint16_t  prefix_len,
-            session_len;
-  char      session[ MAX_SESSION_LEN ];
+  uint16_t   nats_state,   /* ascii hdr mode or binary blob mode */
+             prefix_len,
+             session_len;
+  NatsLogin  user;
+  char       prefix[ 16 ],
+             session[ MAX_SESSION_LEN ];
+  uint64_t   timer_id;
 
   EvNatsService( kv::EvPoll &p,  const uint8_t t,  EvNatsListen &l )
     : kv::EvConnection( p, t ), sub_route( l.sub_route ), listen( l ) {}
-  void initialize_state( const char *pre,  size_t prelen ) {
-    this->msg_ptr   = NULL;
-    this->msg_len   = 0;
-    this->msg_state = NATS_HDR_STATE;
 
-    this->subject = this->reply = this->sid = this->queue = NULL;
-    this->subject_len = this->reply_len = this->sid_len = this->queue_len = 0;
-
+  void initialize_state( const char *pre,  size_t prelen,  uint64_t id ) {
+    this->nats_state = 0;
     this->user.release();
     this->prefix_len = prelen;
     ::memcpy( this->prefix, pre, prelen );
     this->session_len = 0;
+    this->timer_id = id;
   }
   void set_session( const char *sess,  size_t sess_len ) noexcept;
-  void add_sub( void ) noexcept;
-  void rem_sid( uint64_t max_msgs ) noexcept;
+  void add_sub( NatsMsg &msg ) noexcept;
+  void rem_sid( NatsMsg &msg ) noexcept;
   void rem_all_sub( void ) noexcept;
-  bool fwd_pub( void ) noexcept;
+  enum { NATS_FLOW_GOOD = 0, NATS_FLOW_BACKPRESSURE = 1, NATS_FLOW_STALLED = 2 };
+  int fwd_pub( NatsMsg &msg ) noexcept;
   bool fwd_msg( kv::EvPublish &pub,  NatsMsgTransform &xf ) noexcept;
   void parse_connect( const char *buf,  size_t sz ) noexcept;
   bool on_inbox_reply( kv::EvPublish &pub ) noexcept;
@@ -138,6 +178,7 @@ struct EvNatsService : public kv::EvConnection {
   virtual void process_close( void ) noexcept;
   virtual void release( void ) noexcept;
   virtual bool timer_expire( uint64_t tid, uint64_t eid ) noexcept;
+  virtual void read( void ) noexcept;
   virtual bool hash_to_sub( uint32_t h, char *k, size_t &klen ) noexcept;
   virtual bool on_msg( kv::EvPublish &pub ) noexcept;
   virtual uint8_t is_subscribed( const kv::NotifySub &sub ) noexcept;
@@ -148,22 +189,25 @@ struct EvNatsService : public kv::EvConnection {
   virtual size_t get_subscriptions( kv::SubRouteDB &subs,
                                     kv::SubRouteDB &pats,
                                     int &pattern_fmt ) noexcept;
+  virtual void on_write_ready( void ) noexcept;
 };
 
 /* presumes little endian, 0xdf masks out 0x20 for toupper() */
-#define NATS_KW( c1, c2, c3, c4 ) ( (uint32_t) ( c4 & 0xdf ) << 24 ) | \
-                                  ( (uint32_t) ( c3 & 0xdf ) << 16 ) | \
-                                  ( (uint32_t) ( c2 & 0xdf ) << 8 ) | \
-                                  ( (uint32_t) ( c1 & 0xdf ) )
+#define NATS_KW( c1, c2, c3, c4 ) ( ( (uint32_t) ( c4 & 0xdf ) << 24 ) | \
+                                    ( (uint32_t) ( c3 & 0xdf ) << 16 ) | \
+                                    ( (uint32_t) ( c2 & 0xdf ) << 8 ) | \
+                                    ( (uint32_t) ( c1 & 0xdf ) ) )
 #define NATS_KW_OK1     NATS_KW( '+', 'O', 'K', '\r' )
 #define NATS_KW_OK2     NATS_KW( '+', 'O', 'K', '\n' )
 #define NATS_KW_MSG1    NATS_KW( 'M', 'S', 'G', ' ' )
 #define NATS_KW_MSG2    NATS_KW( 'M', 'S', 'G', '\t' )
+#define NATS_KW_HMSG    NATS_KW( 'H', 'M', 'S', 'G' )
 #define NATS_KW_ERR     NATS_KW( '-', 'E', 'R', 'R' )
 #define NATS_KW_SUB1    NATS_KW( 'S', 'U', 'B', ' ' )
 #define NATS_KW_SUB2    NATS_KW( 'S', 'U', 'B', '\t' )
 #define NATS_KW_PUB1    NATS_KW( 'P', 'U', 'B', ' ' )
 #define NATS_KW_PUB2    NATS_KW( 'P', 'U', 'B', '\t' )
+#define NATS_KW_HPUB    NATS_KW( 'H', 'P', 'U', 'B' )
 #define NATS_KW_PING    NATS_KW( 'P', 'I', 'N', 'G' )
 #define NATS_KW_PONG    NATS_KW( 'P', 'O', 'N', 'G' )
 #define NATS_KW_INFO    NATS_KW( 'I', 'N', 'F', 'O' )
@@ -186,7 +230,9 @@ struct EvNatsService : public kv::EvConnection {
 #define NATS_JS_USER         NATS_KW( 'U', 'S', 'E', 'R' )
 #define NATS_JS_PASS         NATS_KW( 'P', 'A', 'S', 'S' )
 #define NATS_JS_AUTH_TOKEN   NATS_KW( 'A', 'U', 'T', 'H' )
-
+#define NATS_JS_HEADERS      NATS_KW( 'H', 'E', 'A', 'D' )
+#define NATS_JS_NO_RESPOND   NATS_KW( 'N', 'O', '_', 'R' )
+#define NATS_JS_BINARY       NATS_KW( 'B', 'I', 'N', 'A' )
 #define NATS_JS_SERVER       NATS_KW( 'S', 'E', 'R', 'V' )
 #define NATS_JS_MAX_PAYLOAD  NATS_KW( 'M', 'A', 'X', '_' )
 #define NATS_JS_CONNECT_URLS NATS_KW( 'C', 'O', 'N', 'N' )
@@ -196,7 +242,7 @@ struct EvNatsService : public kv::EvConnection {
 #define NATS_JS_GIT_COMMIT   NATS_KW( 'G', 'I', 'T', '_' )
 
 struct NatsArgs {
-  static const size_t MAX_NATS_ARGS = 3; /* <subject> <sid> [reply] */
+  static const size_t MAX_NATS_ARGS = 4; /* <subject> <sid> [reply] */
   char * ptr[ MAX_NATS_ARGS ];
   size_t len[ MAX_NATS_ARGS ];
 
@@ -229,7 +275,7 @@ struct NatsArgs {
     }
   }
   /* parse a number from the end of a string */
-  static char * parse_end_size( char *start,  char *end,  size_t &sz,
+  static char * parse_end_size( char *start,  char *end,  uint64_t &sz,
                                 size_t &digits ) {
     while ( end > start ) {
       if ( *--end >= '0' && *end <= '9' ) {
