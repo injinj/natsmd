@@ -142,9 +142,11 @@ EvNatsClient::process( void ) noexcept
 
     NatsMsg msg;
     int fl = msg.parse_msg( &this->recv[ this->off ], &this->recv[ this->len ]);
-    if ( fl == NEED_MORE ) /* put back into read state, more data expected */
+    if ( fl == NEED_MORE ) {
+      if ( msg.size > 0 )
+        this->recv_need( msg.size );
       break;
-
+    }
     switch ( fl ) {
       case RCV_MSG:
       case HRCV_MSG:
@@ -182,7 +184,8 @@ EvNatsClient::process( void ) noexcept
   }
 break_loop:;
   this->pop( EV_PROCESS );
-  this->push_write();
+  if ( ! this->push_write() )
+    this->clear_write_buffers();
 }
 
 void

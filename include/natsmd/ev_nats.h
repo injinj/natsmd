@@ -68,13 +68,16 @@ struct NatsMsgTransform {
              * hdr;
   uint32_t     msg_len,
                hdr_len,
-               msg_enc;
+               msg_enc,
+               idx_ref;
   NatsStr    & sid;
-  bool         is_ready;
+  bool         is_ready,
+               is_converted;
 
   NatsMsgTransform( kv::EvPublish &pub,  NatsStr &id )
     : msg( pub.msg ), hdr( 0 ), msg_len( pub.msg_len ), hdr_len( pub.hdr_len ),
-      msg_enc( pub.msg_enc ), sid( id ), is_ready( false ) {
+      msg_enc( pub.msg_enc ), idx_ref( 0 ), sid( id ), is_ready( false ),
+      is_converted( false ) {
     if ( pub.hdr_len > 0 ) {
       this->hdr = this->msg;
       this->msg = &((const char *) this->msg)[ pub.hdr_len ];
@@ -136,7 +139,8 @@ struct NatsMsg {
 
 enum NatsState { /* msg_state */
   NATS_HAS_TIMER    = 1, /* timer running */
-  NATS_BACKPRESSURE = 2  /* backpressure */
+  NATS_BACKPRESSURE = 2, /* backpressure */
+  NATS_BUFFERSIZE   = 4  /* input size over recv highwater */
 };
 
 struct EvNatsService : public kv::EvConnection, public kv::BPData {
@@ -157,12 +161,13 @@ struct EvNatsService : public kv::EvConnection, public kv::BPData {
     : kv::EvConnection( p, t ), sub_route( l.sub_route ), listen( l ) {}
 
   void initialize_state( const char *pre,  size_t prelen,  uint64_t id ) {
-    this->nats_state = 0;
+    this->nats_state  = 0;
     this->user.release();
-    this->prefix_len = prelen;
+    this->prefix_len  = prelen;
     ::memcpy( this->prefix, pre, prelen );
     this->session_len = 0;
-    this->timer_id = id;
+    this->timer_id    = id;
+    this->bp_flags    = kv::BP_NOTIFY;
   }
   void set_session( const char *sess,  size_t sess_len ) noexcept;
   void add_sub( NatsMsg &msg ) noexcept;

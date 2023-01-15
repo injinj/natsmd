@@ -201,15 +201,21 @@ EvNatsService::process( void ) noexcept
   const int verb_ok = ( this->user.verbose ? DO_OK : 0 );
   int flow;
 
+  if ( this->len - this->off > this->recv_highwater )
+    this->nats_state |= NATS_BUFFERSIZE;
+  else
+    this->nats_state &= ~NATS_BUFFERSIZE;
   for (;;) {
     if ( this->off == this->len )
       break;
 
     NatsMsg msg;
     int fl = msg.parse_msg( &this->recv[ this->off ], &this->recv[ this->len ]);
-    if ( fl == NEED_MORE )
+    if ( fl == NEED_MORE ) {
+      if ( msg.size > 0 )
+        this->recv_need( msg.size );
       break;
-
+    }
     if ( this->user.stamp == 0 && fl <= REM_SID )
       this->parse_connect( NULL, 0 );
 
@@ -230,10 +236,15 @@ EvNatsService::process( void ) noexcept
           this->nats_state &= ~NATS_BACKPRESSURE;
         else {
           this->nats_state |= NATS_BACKPRESSURE;
-          fl |= FLOW_BACKPRESSURE;
-          if ( flow == NATS_FLOW_STALLED )
-            goto skip_backpressure;
+          if ( flow == NATS_FLOW_STALLED ) {
+            this->pop( EV_PROCESS );
+            this->pop3( EV_READ, EV_READ_LO, EV_READ_HI );
+            if ( ! this->push_write_high() )
+              this->clear_write_buffers();
+            return;
+          }
         }
+        this->msgs_recv++;
         fl |= verb_ok;
         break;
 
@@ -257,20 +268,10 @@ EvNatsService::process( void ) noexcept
       this->append( ok, sizeof( ok ) - 1 );
     if ( ( fl & DO_ERR ) != 0 )
       this->append( err, sizeof( err ) - 1 );
-    if ( ( fl & FLOW_BACKPRESSURE ) != 0 )
-      goto backpressure;
   }
   this->pop( EV_PROCESS );
   if ( ! this->push_write() )
-    this->StreamBuf::reset();
-  return;
-
-skip_backpressure:;
-  this->pop( EV_PROCESS );
-  this->pop3( EV_READ, EV_READ_LO, EV_READ_HI );
-backpressure:;
-  if ( ! this->push_write_high() )
-    this->StreamBuf::reset();
+    this->clear_write_buffers();
 }
 
 int
@@ -281,9 +282,10 @@ NatsMsg::parse_msg( char *start,  char *end ) noexcept
   size_t linesz, nargs, size_len;
   int    pub_type;
 
-  if ( eol == NULL )
+  if ( eol == NULL ) {
+    this->size = 0;
     return NEED_MORE;
-
+  }
   linesz     = &eol[ 1 ] - start; /* 1 char after \n */
   this->line = start;
   this->size = linesz;
@@ -352,9 +354,10 @@ NatsMsg::parse_msg( char *start,  char *end ) noexcept
       }
       this->msg_ptr = p;
       p = &p[ this->msg_len ];
-      if ( p > end )
+      if ( p > end ) {
+        this->size += this->msg_len;
         return NEED_MORE;
-
+      }
       nargs = args.parse( &start[ 4 ], size_start );
       if ( nargs < 1 || nargs > 3 )
         return DO_ERR;
@@ -620,10 +623,8 @@ EvNatsService::fwd_pub( NatsMsg &msg ) noexcept
                  MD_STRING, 'p' );
   pub.hdr_len = msg.hdr_len;
   BPData * data = NULL;
-  if ( ( this->nats_state & NATS_BACKPRESSURE ) != 0 ) {
+  if ( ( this->nats_state & ( NATS_BACKPRESSURE | NATS_BUFFERSIZE ) ) != 0 )
     data = this;
-    this->bp_flags = ( this->bp_flags & ~BP_FORWARD ) | BP_NOTIFY;
-  }
   if ( this->sub_route.forward_msg( pub, data ) )
     return NATS_FLOW_GOOD;
   if ( ! this->bp_in_list() )
@@ -787,8 +788,14 @@ EvNatsService::fwd_msg( EvPublish &pub,  NatsMsgTransform &xf ) noexcept
   len = sublen + 1 +           /* <subject> */
         sid_len + 1 +          /* <sid> */
         ( replen > 0 ? replen + 1 : 0 ) + /* [reply] */
-        msg_len_digits + 2 +   /* <size> \r\n */
-        xf.msg_len + 2;        /* <blob> \r\n */
+        msg_len_digits + 2;    /* <size> \r\n */
+
+  if ( ! xf.is_converted && xf.msg_len + xf.hdr_len > this->recv_highwater ) {
+    if ( xf.idx_ref == 0 )
+      xf.idx_ref = this->poll.zero_copy_ref( pub.src_route, xf.msg, xf.msg_len );
+  }
+  if ( xf.idx_ref == 0 )
+    len += xf.msg_len + 2;        /* <blob> \r\n */
 
   if ( xf.hdr_len == 0 ) {
     len += 4; /* MSG */
@@ -799,7 +806,7 @@ EvNatsService::fwd_msg( EvPublish &pub,  NatsMsgTransform &xf ) noexcept
            hdr_len_digits + 1 + /* <hsize> */
            xf.hdr_len;
   }
-  CatPtr p( this->alloc( len ) );
+  CatPtr p( this->alloc_temp( len ) );
 
   if ( xf.hdr_len == 0 )
     p.s( "MSG " );
@@ -814,9 +821,15 @@ EvNatsService::fwd_msg( EvPublish &pub,  NatsMsgTransform &xf ) noexcept
   p.u( xf.msg_len + xf.hdr_len, msg_len_digits ).s( "\r\n" );
   if ( xf.hdr_len > 0 )
     p.b( xf.hdr, xf.hdr_len );
-  p.b( xf.msg, xf.msg_len ).s( "\r\n" );
 
-  this->sz += len;
+  if ( xf.idx_ref == 0 ) {
+    p.b( xf.msg, xf.msg_len ).s( "\r\n" );
+    this->append_iov( p.start, len );
+  }
+  else {
+    this->append_ref_iov( p.start, len, xf.msg, xf.msg_len, xf.idx_ref, 2 );
+  }
+  this->msgs_sent++;
   return this->idle_push_write();
 }
 
@@ -834,6 +847,7 @@ NatsMsgTransform::transform( void ) noexcept
   if ( jmsg.convert_msg( *m ) == 0 && jmsg.finish() ) {
     this->msg     = start;
     this->msg_len = jmsg.off;
+    this->is_converted = true;
   }
 }
 

@@ -184,6 +184,8 @@ all_depends :=
 gen_files   :=
 
 ev_nats_defines := -DNATSMD_VER=$(ver_build)
+$(objd)/ev_nats.o : .copr/Makefile
+$(objd)/ev_nats.fpic.o : .copr/Makefile
 libnatsmd_files := ev_nats ev_nats_client
 libnatsmd_cfile := $(addprefix src/, $(addsuffix .cpp, $(libnatsmd_files)))
 libnatsmd_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(libnatsmd_files)))
@@ -201,7 +203,9 @@ all_libs    += $(libd)/libnatsmd.a
 all_dlls    += $(libd)/libnatsmd.so
 all_depends += $(libnatsmd_deps)
 
-server_defines := -DCAPR_VER=$(ver_build)
+server_defines := -DNATSMD_VER=$(ver_build)
+$(objd)/server.o : .copr/Makefile
+$(objd)/server.fpic.o : .copr/Makefile
 natsmd_server_files := server
 natsmd_server_cfile := $(addprefix src/, $(addsuffix .cpp, $(natsmd_server_files)))
 natsmd_server_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(natsmd_server_files)))
@@ -226,6 +230,9 @@ ping_nats_libs  :=
 ping_nats_lnk   := $(lnk_lib) $(hdr_lib)
 
 $(bind)/ping_nats: $(ping_nats_objs) $(ping_nats_libs) $(lnk_dep)
+
+all_exes    += $(bind)/ping_nats
+all_depends += $(ping_nats_deps)
 
 test_map_files := test_map
 test_map_cfile := $(addprefix test/, $(addsuffix .cpp, $(test_map_files)))
