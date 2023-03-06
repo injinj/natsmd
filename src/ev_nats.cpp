@@ -902,6 +902,12 @@ EvNatsService::read( void ) noexcept
   this->pop3( EV_READ, EV_READ_HI, EV_READ_LO );
 }
 
+bool
+EvNatsService::get_service( void *host,  uint16_t &svc ) noexcept
+{
+  return this->listen.get_service( host, svc );
+}
+
 size_t
 EvNatsService::get_userid( char userid[ MAX_USERID_LEN ] ) noexcept
 {
@@ -914,22 +920,21 @@ EvNatsService::get_userid( char userid[ MAX_USERID_LEN ] ) noexcept
   return 0;
 }
 
-void
-EvNatsService::set_session( const char *sess,  size_t sess_len ) noexcept
+bool
+EvNatsService::set_session( const char session[ MAX_SESSION_LEN ] ) noexcept
 {
-  if ( sess_len == 0 || sess_len >= sizeof( this->session ) ) {
-    fprintf( stderr, "bad session_len %lu\n", sess_len );
-    this->session_len = 0;
-    return;
+  size_t len = ::strlen( session );
+  if ( len >= sizeof( this->session ) ) {
+    return false;
   }
-  ::memcpy( this->session, sess, sess_len );
-  this->session[ sess_len ] = '\0';
-  this->session_len = sess_len;
+  this->session_len = len;
+  ::memcpy( this->session, session, this->session_len );
+  this->session[ this->session_len ] = '\0';
 
   static char inbox_sid[] = "I";
   CatBuf< 7 + sizeof( this->session ) + 3 > inbox;
 
-  inbox.s( "_INBOX." ).x( sess, sess_len ).s( ".>" ).end();
+  inbox.s( "_INBOX." ).x( session, this->session_len ).s( ".>" ).end();
 
   NatsMsg msg;
   msg.subject     = inbox.buf;
@@ -938,17 +943,16 @@ EvNatsService::set_session( const char *sess,  size_t sess_len ) noexcept
   msg.sid_len     = 1;
 
   this->add_sub( msg );
+  return true;
 }
 
 size_t
-EvNatsService::get_session( const char *svc,  size_t svc_len,
+EvNatsService::get_session( uint16_t svc,
                             char session[ MAX_SESSION_LEN ] ) noexcept
 {
   if ( this->session_len > 0 ) {
-    bool match = ( svc_len == 0 ||
-                   ( svc_len == this->prefix_len &&
-                     ::memcmp( svc, this->prefix, svc_len ) == 0 ) );
-    if ( match ) {
+    uint16_t tmp = 0;
+    if ( this->listen.get_service( NULL, tmp ) && svc == tmp ) {
       ::memcpy( session, this->session, this->session_len );
       session[ this->session_len ] = '\0';
       return this->session_len;
@@ -959,36 +963,23 @@ EvNatsService::get_session( const char *svc,  size_t svc_len,
 }
 
 size_t
-EvNatsService::get_subscriptions( SubRouteDB &subs,  SubRouteDB &pats,
-                                  int &pattern_fmt ) noexcept
+EvNatsService::get_subscriptions( uint16_t svc,  SubRouteDB &subs ) noexcept
 {
-  RouteLoc           pos,
-                     loc;
-  NatsSubRoute     * r;
-  NatsPatternRoute * p;
-  size_t             prelen = this->prefix_len,
-                     cnt    = 0,
-                     len;
-  const char       * val;
-  uint32_t           h;
-
-  pattern_fmt = RV_PATTERN_FMT;
+  RouteLoc       pos,
+                 loc;
+  NatsSubRoute * r;
+  size_t         prelen = this->prefix_len,
+                 cnt    = 0;
+  uint16_t       tmp    = 0;
+  if ( ! this->listen.get_service( NULL, tmp ) || svc != tmp )
+    return 0;
   for ( r = this->map.sub_tab.first( pos ); r != NULL;
         r = this->map.sub_tab.next( pos ) ) {
-    val = &r->value[ prelen ];
-    len = r->subj_len - prelen;
-    h   = kv_crc_c( val, len, 0 );
-    subs.upsert( h, val, len, loc );
-    if ( loc.is_new )
-      cnt++;
-  }
-  for ( p = this->map.pat_tab.first( pos ); p != NULL;
-        p = this->map.pat_tab.next( pos ) ) {
-    for ( NatsWildMatch *m = p->list.hd; m != NULL; m = m->next ) {
-      val = &m->value[ prelen ];
-      len = m->subj_len - prelen;
-      h   = kv_crc_c( val, len, 0 );
-      pats.upsert( h, val, len, loc );
+    if ( r->subj_len > prelen ) {
+      const char * val = &r->value[ prelen ];
+      size_t       len = r->subj_len - prelen;
+      uint32_t     h   = kv_crc_c( val, len, 0 );
+      subs.upsert( h, val, len, loc );
       if ( loc.is_new )
         cnt++;
     }
@@ -996,6 +987,35 @@ EvNatsService::get_subscriptions( SubRouteDB &subs,  SubRouteDB &pats,
   return cnt;
 }
 
+size_t
+EvNatsService::get_patterns( uint16_t svc,  int pat_fmt,
+                             SubRouteDB &pats ) noexcept
+{
+  RouteLoc           pos,
+                     loc;
+  NatsPatternRoute * p;
+  size_t             prelen = this->prefix_len,
+                     cnt    = 0;
+  uint16_t           tmp    = 0;
+  if ( ! this->listen.get_service( NULL, tmp ) || svc != tmp )
+    return 0;
+  if ( pat_fmt != RV_PATTERN_FMT )
+    return 0;
+  for ( p = this->map.pat_tab.first( pos ); p != NULL;
+        p = this->map.pat_tab.next( pos ) ) {
+    for ( NatsWildMatch *m = p->list.hd; m != NULL; m = m->next ) {
+      if ( m->subj_len > prelen ) {
+        const char * val = &m->value[ prelen ];
+        size_t       len = m->subj_len - prelen;
+        uint32_t     h   = kv_crc_c( val, len, 0 );
+        pats.upsert( h, val, len, loc );
+        if ( loc.is_new )
+          cnt++;
+      }
+    }
+  }
+  return cnt;
+}
 
 void
 EvNatsService::parse_connect( const char *buf,  size_t bufsz ) noexcept
