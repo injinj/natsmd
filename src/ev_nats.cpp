@@ -550,22 +550,35 @@ EvNatsService::rem_sid( NatsMsg &msg ) noexcept
   NatsSubStatus status;
   bool          coll = false;
 
-  status = map.unsub( sid, msg.max_msgs, look, coll );
-  if ( status == NATS_EXPIRED ) {
+  status = this->map.unsub( sid, msg.max_msgs, look, coll );
+  if ( status != NATS_NOT_FOUND ) {
     if ( look.rt != NULL ) {
       NotifySub nsub( look.rt->value, look.rt->subj_len, look.hash, this->fd,
                       coll, 'N', this );
-      this->sub_route.del_sub( nsub );
+      if ( status == NATS_EXPIRED ) {
+        this->sub_route.del_sub( nsub );
+        map.unsub_remove( look );
+      }
+      else {
+        nsub.sub_count = look.rt->refcnt;
+        this->sub_route.notify_unsub( nsub );
+      }
     }
     else {
       PatternCvt cvt;
       if ( cvt.convert_rv( look.match->value, look.match->subj_len ) == 0 ) {
         NotifyPattern npat( cvt, look.match->value, look.match->subj_len,
                             look.hash, this->fd, coll, 'N', this );
-        this->sub_route.del_pat( npat );
+        if ( status == NATS_EXPIRED ) {
+          this->sub_route.del_pat( npat );
+          map.unsub_remove( look );
+        }
+        else {
+          npat.sub_count = look.match->refcnt;
+          this->sub_route.notify_unpat( npat );
+        }
       }
     }
-    map.unsub_remove( look );
   }
 }
 
@@ -656,10 +669,14 @@ EvNatsService::on_msg( EvPublish &pub ) noexcept
         }
         if ( status == NATS_EXPIRED ) {
           status = this->map.expired( look, coll );
+          NotifySub nsub( subj.str, subj.len, h, this->fd, coll, 'N', this );
           if ( status == NATS_EXPIRED ) {
-            NotifySub nsub( subj.str, subj.len, h, this->fd, coll, 'N', this );
             this->sub_route.del_sub( nsub );
             this->map.unsub_remove( look );
+          }
+          else {
+            nsub.sub_count = look.rt->refcnt;
+            this->sub_route.notify_unsub( nsub );
           }
         }
       }
@@ -680,17 +697,21 @@ EvNatsService::on_msg( EvPublish &pub ) noexcept
         }
         if ( status == NATS_EXPIRED ) {
           status = this->map.expired_pattern( look, coll );
-          if ( status == NATS_EXPIRED ) {
-            PatternCvt cvt;
-            if ( cvt.convert_rv( look.match->value,
-                                 look.match->subj_len ) == 0 ) {
-              NotifyPattern npat( cvt, look.match->value, look.match->subj_len,
-                                  h, this->fd, coll, 'N', this );
+          PatternCvt cvt;
+          NotifyPattern npat( cvt, look.match->value, look.match->subj_len,
+                              h, this->fd, coll, 'N', this );
+          if ( cvt.convert_rv( look.match->value,
+                               look.match->subj_len ) == 0 ) {
+            if ( status == NATS_EXPIRED ) {
               this->sub_route.del_pat( npat );
+              this->map.unsub_remove( look );
             }
-            this->map.unsub_remove( look );
-            break;
+            else {
+              npat.sub_count = look.match->refcnt;
+              this->sub_route.notify_unpat( npat );
+            }
           }
+          break;
         }
         status = this->map.lookup_next( subj, look );
       }

@@ -496,6 +496,7 @@ struct NatsSubMap {
           if ( m->hash == entry->subj_hash ) {
             status = m->unsub( *entry, max_msgs );
             if ( status != NATS_NOT_FOUND ) {
+              look.match = m;
               if ( status == NATS_EXPIRED ) {
                 this->sid_tab.remove( sid_loc );
                 if ( m->refcnt == 0 ) {
@@ -507,7 +508,6 @@ struct NatsSubMap {
                                                           next ) != NULL )
                       collision = true;
                   }
-                  look.match = m;
                   return NATS_EXPIRED;
                 }
               }
@@ -546,11 +546,11 @@ struct NatsSubMap {
   }
   /* remove after unsubscribe */
   void unsub_remove( NatsLookup &look ) {
-    if ( look.rt != NULL ) {
+    if ( look.rt != NULL && look.rt->refcnt == 0 ) {
       this->sub_tab.remove( look.loc );
       look.rt = NULL;
     }
-    else {
+    else if ( look.match != NULL && look.match->refcnt == 0 ) {
       look.pat->list.pop( look.match );
       delete look.match;
       look.match = NULL;
