@@ -150,7 +150,7 @@ NatsDataCallback::send_dict_request( void ) noexcept
   uint16_t inbox_len = this->client.make_inbox( inbox, DICT_INBOX_ID );
   /* request dictionar */
   EvPublish pub( DICT_SUBJ, DICT_SUBJ_LEN, inbox, inbox_len,
-                 "x", 1, this->client.sub_route, 0, 0, 0, 0 );
+                 "x", 1, this->client.sub_route, this->client, 0, 0, 0 );
   this->client.publish( pub );
 }
 

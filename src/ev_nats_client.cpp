@@ -307,7 +307,7 @@ EvNatsClient::fwd_pub( NatsMsg &msg ) noexcept
   EvPublish pub( msg.subject, msg.subject_len,
                  msg.reply, msg.reply_len,
                  msg.msg_ptr, msg.msg_len,
-                 this->sub_route, this->fd, xsub.hash(),
+                 this->sub_route, *this, xsub.hash(),
                  MD_STRING, 'p' );
   uint32_t       pmatch;
   bool           flow = true;
@@ -501,11 +501,17 @@ encode_sub( char *p,  const char *q,  size_t sz )
 bool
 EvNatsClient::on_msg( EvPublish &pub ) noexcept
 {
+  if ( this->equals( pub.src_route ) ) /* no echo */
+    return true;
+  return this->publish( pub );
+}
+
+bool
+EvNatsClient::publish( EvPublish &pub ) noexcept
+{
   char * p;
   size_t len, msg_len_digits;
 
-  if ( pub.src_route == (uint32_t) this->fd ) /* no echo */
-    return true;
   if ( nats_client_msg_verbose )
     printf( "on_msg(%.*s) reply(%.*s)\n",
             (int) pub.subject_len, pub.subject,
@@ -583,12 +589,6 @@ EvNatsClient::on_msg( EvPublish &pub ) noexcept
     }
   }
   return this->idle_push_write();
-}
-
-bool
-EvNatsClient::publish( EvPublish &pub ) noexcept
-{
-  return this->on_msg( pub );
 }
 
 /* hash subject to insert sid into sid_ht,

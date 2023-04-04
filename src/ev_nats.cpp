@@ -500,7 +500,7 @@ EvNatsService::add_sub( NatsMsg &msg ) noexcept
       if ( status == NATS_IS_NEW || status == NATS_OK ||
            ( status == NATS_EXISTS && sub_m != NULL ) ) {
         NotifyPattern npat( cvt, subj.str, subj.len, h,
-                            this->fd, coll, 'N', this );
+                            coll, 'N', *this );
         if ( status == NATS_IS_NEW )
           this->sub_route.add_pat( npat );
         else {
@@ -527,7 +527,7 @@ EvNatsService::add_sub( NatsMsg &msg ) noexcept
     if ( status == NATS_IS_NEW || status == NATS_OK ||
          ( status == NATS_EXISTS && sub_rt != NULL ) ) {
       NotifySub nsub( subj.str, subj.len, inbox, inbox_len, subj.hash(),
-                      this->fd, coll, 'N', this );
+                      coll, 'N', *this );
       if ( status == NATS_IS_NEW )
         this->sub_route.add_sub( nsub );
       else {
@@ -553,8 +553,8 @@ EvNatsService::rem_sid( NatsMsg &msg ) noexcept
   status = this->map.unsub( sid, msg.max_msgs, look, coll );
   if ( status != NATS_NOT_FOUND ) {
     if ( look.rt != NULL ) {
-      NotifySub nsub( look.rt->value, look.rt->subj_len, look.hash, this->fd,
-                      coll, 'N', this );
+      NotifySub nsub( look.rt->value, look.rt->subj_len, look.hash,
+                      coll, 'N', *this );
       if ( status == NATS_EXPIRED ) {
         this->sub_route.del_sub( nsub );
         map.unsub_remove( look );
@@ -568,7 +568,7 @@ EvNatsService::rem_sid( NatsMsg &msg ) noexcept
       PatternCvt cvt;
       if ( cvt.convert_rv( look.match->value, look.match->subj_len ) == 0 ) {
         NotifyPattern npat( cvt, look.match->value, look.match->subj_len,
-                            look.hash, this->fd, coll, 'N', this );
+                            look.hash, coll, 'N', *this );
         if ( status == NATS_EXPIRED ) {
           this->sub_route.del_pat( npat );
           map.unsub_remove( look );
@@ -592,7 +592,7 @@ EvNatsService::rem_all_sub( void ) noexcept
   for ( r = this->map.sub_tab.first( loc ); r;
         r = this->map.sub_tab.next( loc ) ) {
     bool coll = this->map.sub_tab.rem_collision( r );
-    NotifySub nsub( r->value, r->subj_len, r->hash, this->fd, coll, 'N', this );
+    NotifySub nsub( r->value, r->subj_len, r->hash, coll, 'N', *this );
     this->sub_route.del_sub( nsub );
   }
   for ( p = this->map.pat_tab.first( loc ); p;
@@ -602,7 +602,7 @@ EvNatsService::rem_all_sub( void ) noexcept
       if ( cvt.convert_rv( m->value, m->subj_len ) == 0 ) {
         bool coll = this->map.pat_tab.rem_collision( p, m );
         NotifyPattern npat( cvt, m->value, m->subj_len, p->hash,
-                            this->fd, coll, 'N', this );
+                            coll, 'N', *this );
         this->sub_route.del_pat( npat );
       }
     }
@@ -629,11 +629,13 @@ EvNatsService::fwd_pub( NatsMsg &msg ) noexcept
       replen += preflen;
     }
   }
+  if ( is_nats_debug )
+    printf( "fwd_pub sub=%.*s, rep=%.*s msg_len=%u\n",
+            (int) sublen, sub, (int) replen, rep, (uint32_t) msg.msg_len );
+
   uint32_t  h = kv_crc_c( sub, sublen, 0 );
-  EvPublish pub( sub, sublen, rep, replen,
-                 msg.msg_ptr, msg.msg_len,
-                 this->sub_route, this->fd, h,
-                 MD_STRING, 'p' );
+  EvPublish pub( sub, sublen, rep, replen, msg.msg_ptr, msg.msg_len,
+                 this->sub_route, *this, h, MD_STRING, 'p' );
   pub.hdr_len = msg.hdr_len;
   BPData * data = NULL;
   if ( ( this->nats_state & ( NATS_BACKPRESSURE | NATS_BUFFERSIZE ) ) != 0 )
@@ -655,7 +657,7 @@ EvNatsService::on_msg( EvPublish &pub ) noexcept
   bool             b, coll, flow_good = true;
 
   /* if client does not want to see the msgs it published */
-  if ( ! this->user.echo && (uint32_t) this->fd == pub.src_route )
+  if ( ! this->user.echo && this->equals( pub.src_route ) )
     return true;
 
   for ( uint8_t cnt = 0; cnt < pub.prefix_cnt; cnt++ ) {
@@ -669,7 +671,7 @@ EvNatsService::on_msg( EvPublish &pub ) noexcept
         }
         if ( status == NATS_EXPIRED ) {
           status = this->map.expired( look, coll );
-          NotifySub nsub( subj.str, subj.len, h, this->fd, coll, 'N', this );
+          NotifySub nsub( subj.str, subj.len, h, coll, 'N', *this );
           if ( status == NATS_EXPIRED ) {
             this->sub_route.del_sub( nsub );
             this->map.unsub_remove( look );
@@ -699,7 +701,7 @@ EvNatsService::on_msg( EvPublish &pub ) noexcept
           status = this->map.expired_pattern( look, coll );
           PatternCvt cvt;
           NotifyPattern npat( cvt, look.match->value, look.match->subj_len,
-                              h, this->fd, coll, 'N', this );
+                              h, coll, 'N', *this );
           if ( cvt.convert_rv( look.match->value,
                                look.match->subj_len ) == 0 ) {
             if ( status == NATS_EXPIRED ) {
@@ -785,6 +787,9 @@ EvNatsService::fwd_msg( EvPublish &pub,  NatsMsgTransform &xf ) noexcept
              (int) replen, rep, (int) preflen );
     return true;
   }
+  if ( is_nats_debug )
+    printf( "fwd_msg sub=%.*s, rep=%.*s msg_len=%u\n",
+            (int) sublen, sub, (int) replen, rep, (uint32_t) pub.msg_len );
   sublen -= preflen;
   sub     = &sub[ preflen ];
   if ( replen > 0 ) {
@@ -813,7 +818,7 @@ EvNatsService::fwd_msg( EvPublish &pub,  NatsMsgTransform &xf ) noexcept
 
   if ( ! xf.is_converted && xf.msg_len + xf.hdr_len > this->recv_highwater ) {
     if ( xf.idx_ref == 0 )
-      xf.idx_ref = this->poll.zero_copy_ref( pub.src_route, xf.msg, xf.msg_len );
+      xf.idx_ref = this->poll.zero_copy_ref( pub.src_route.fd, xf.msg, xf.msg_len );
   }
   if ( xf.idx_ref == 0 )
     len += xf.msg_len + 2;        /* <blob> \r\n */
@@ -924,13 +929,13 @@ EvNatsService::read( void ) noexcept
 }
 
 bool
-EvNatsService::get_service( void *host,  uint16_t &svc ) noexcept
+EvNatsService::get_service( void *host,  uint16_t &svc ) const noexcept
 {
   return this->listen.get_service( host, svc );
 }
 
 size_t
-EvNatsService::get_userid( char userid[ MAX_USERID_LEN ] ) noexcept
+EvNatsService::get_userid( char userid[ MAX_USERID_LEN ] ) const noexcept
 {
   if ( this->user.user != NULL ) {
     size_t len = min_int( MAX_USERID_LEN - 1, ::strlen( this->user.user ) );
@@ -969,7 +974,7 @@ EvNatsService::set_session( const char session[ MAX_SESSION_LEN ] ) noexcept
 
 size_t
 EvNatsService::get_session( uint16_t svc,
-                            char session[ MAX_SESSION_LEN ] ) noexcept
+                            char session[ MAX_SESSION_LEN ] ) const noexcept
 {
   if ( this->session_len > 0 ) {
     uint16_t tmp = 0;
