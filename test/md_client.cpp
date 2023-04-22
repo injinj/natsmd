@@ -217,7 +217,7 @@ NatsDataCallback::on_msg( EvPublish &pub ) noexcept
       return true;
     }
     else {
-      printf( "## Unknown inbox message (%lu)\n", which );
+      printf( "## Unknown inbox message (%u)\n", (uint32_t) which );
     }
   }
   else { /* not inbox subject */

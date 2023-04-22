@@ -4,7 +4,7 @@
 #include <stdint.h>
 #define __STDC_FORMAT_MACROS
 #include <inttypes.h>
-#ifndef _MSC_VER
+#if ! defined( _MSC_VER ) && ! defined( __MINGW32__ )
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netdb.h>
@@ -153,7 +153,7 @@ EvNatsListen::accept( void ) noexcept
     struct sockaddr_storage myaddr;
     socklen_t myaddrlen = sizeof( myaddr );
     int status;
-#ifndef _MSC_VER
+#if ! defined( _MSC_VER ) && ! defined( __MINGW32__ )
     status = ::getsockname( c->fd, (sockaddr *) &myaddr, &myaddrlen );
 #else
     SOCKET sock;

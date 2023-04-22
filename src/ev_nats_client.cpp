@@ -2,7 +2,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#if ! defined( _MSC_VER ) && ! defined( __MINGW32__ )
 #include <unistd.h>
+#else
+#include <raikv/win.h>
+#endif
 #include <natsmd/ev_nats_client.h>
 #include <raikv/ev_publish.h>
 #include <raikv/bit_set.h>
@@ -193,7 +197,7 @@ EvNatsClient::make_session( void ) noexcept
 {
   uint64_t now = kv_current_realtime_ns(), mo = kv_current_monotonic_time_ns();
   char host[ 256 ], inbox[ 8 + 64 ];
-  gethostname( host, sizeof( host ) );
+  ::gethostname( host, sizeof( host ) );
   uint32_t x[ 2 ];
   x[ 0 ] = kv_crc_c( host, ::strlen( host ), (uint32_t) now );
   x[ 1 ] = kv_hash_uint2( x[ 0 ], (uint32_t) mo );

@@ -1,10 +1,10 @@
-# defines a directory for build, for example, RH6_x86_64
+# natsmd makefile
 lsb_dist     := $(shell if [ -f /etc/os-release ] ; then \
-		  grep '^NAME=' /etc/os-release | sed 's/.*=\"//' | sed 's/ .*//' ; \
+                  grep '^NAME=' /etc/os-release | sed 's/.*=[\"]*//' | sed 's/[ \"].*//' ; \
                   elif [ -x /usr/bin/lsb_release ] ; then \
                   lsb_release -is ; else echo Linux ; fi)
 lsb_dist_ver := $(shell if [ -f /etc/os-release ] ; then \
-		  grep '^VERSION=' /etc/os-release | sed 's/.*=\"//' | sed 's/ .*//' | sed 's/\"//' ; \
+		  grep '^VERSION=' /etc/os-release | sed 's/.*=[\"]*//' | sed 's/[ \"].*//' ; \
                   elif [ -x /usr/bin/lsb_release ] ; then \
                   lsb_release -rs | sed 's/[.].*//' ; else uname -r | sed 's/[-].*//' ; fi)
 #lsb_dist     := $(shell if [ -x /usr/bin/lsb_release ] ; then lsb_release -is ; else echo Linux ; fi)
@@ -34,96 +34,138 @@ endif
 ifeq (-a,$(findstring -a,$(port_extra)))
   default_cflags := -fsanitize=address -ggdb -O3
 endif
-
+ifeq (-mingw,$(findstring -mingw,$(port_extra)))
+  CC    := /usr/bin/x86_64-w64-mingw32-gcc
+  CXX   := /usr/bin/x86_64-w64-mingw32-g++
+  mingw := true
+endif
+# msys2 using ucrt64
+ifeq (MSYS2,$(lsb_dist))
+  mingw := true
+endif
 CC          ?= gcc
 CXX         ?= g++
-cc          := $(CC)
+cc          := $(CC) -std=c11
 cpp         := $(CXX)
-# if not linking libstdc++
-ifdef NO_STL
-cppflags    := -std=c++11 -fno-rtti -fno-exceptions
-cpplink     := $(CC)
-else
-cppflags    := -std=c++11
-cpplink     := $(CXX)
-endif
 arch_cflags := -mavx -maes -fno-omit-frame-pointer
 gcc_wflags  := -Wall -Wextra -Werror
-fpicflags   := -fPIC
-soflag      := -shared
 
+# if windows cross compile
+ifeq (true,$(mingw))
+dll         := dll
+exe         := .exe
+soflag      := -shared -Wl,--subsystem,windows
+fpicflags   := -fPIC -DNATS_SHARED
+sock_lib    := -lcares -lws2_32
+dynlink_lib := -lpcre2-8
+NO_STL      := 1
+else
+dll         := so
+exe         :=
+soflag      := -shared
+fpicflags   := -fPIC
+thread_lib  := -pthread -lrt
+sock_lib    := -lcares
+dynlink_lib := -lpcre2-8
+endif
+# make apple shared lib
+ifeq (Darwin,$(lsb_dist)) 
+dll         := dylib
+endif
 # rpmbuild uses RPM_OPT_FLAGS
-CFLAGS := $(default_cflags)
-#RPM_OPT_FLAGS ?= $(default_cflags)
-#CFLAGS ?= $(RPM_OPT_FLAGS)
+ifeq ($(RPM_OPT_FLAGS),)
+CFLAGS ?= $(default_cflags)
+else
+CFLAGS ?= $(RPM_OPT_FLAGS)
+endif
 cflags := $(gcc_wflags) $(CFLAGS) $(arch_cflags)
 
-# where to find the raids/xyz.h files
-INCLUDES    ?= -Iinclude -Iraikv/include -Iraimd/include
-includes    := $(INCLUDES)
-DEFINES     ?=
-defines     := $(DEFINES)
-cpp_lnk     :=
-sock_lib    :=
-math_lib    := -lm
-thread_lib  := -pthread -lrt
+INCLUDES  ?= -Iinclude -Iraikv/include -Iraimd/include
+DEFINES   ?=
+includes  := $(INCLUDES)
+defines   := $(DEFINES)
+
+# if not linking libstdc++
+ifdef NO_STL
+cppflags  := -std=c++11 -fno-rtti -fno-exceptions
+cpplink   := $(CC)
+else
+cppflags  := -std=c++11
+cpplink   := $(CXX)
+endif
+
+rpath     := -Wl,-rpath,$(pwd)/$(libd)
+math_lib  := -lm
 
 # test submodules exist (they don't exist for dist_rpm, dist_dpkg targets)
-have_md_submodule    := $(shell if [ -f ./raimd/GNUmakefile ]; then echo yes; else echo no; fi )
-have_dec_submodule   := $(shell if [ -f ./raimd/libdecnumber/GNUmakefile ]; then echo yes; else echo no; fi )
-have_kv_submodule    := $(shell if [ -f ./raikv/GNUmakefile ]; then echo yes; else echo no; fi )
-have_hdr_submodule   := $(shell if [ -f ./HdrHistogram_c/GNUmakefile ]; then echo yes; else echo no; fi )
+test_makefile = $(shell if [ -f ./$(1)/GNUmakefile ] ; then echo ./$(1) ; \
+                        elif [ -f ../$(1)/GNUmakefile ] ; then echo ../$(1) ; fi)
+
+md_home     := $(call test_makefile,raimd)
+dec_home    := $(call test_makefile,libdecnumber)
+kv_home     := $(call test_makefile,raikv)
+hdr_home    := $(call test_makefile,HdrHistogram_c)
+
+ifeq (,$(dec_home))
+dec_home    := $(call test_makefile,$(md_home)/libdecnumber)
+endif
 
 lnk_lib     :=
 dlnk_lib    :=
 lnk_dep     :=
 dlnk_dep    :=
 
-# if building submodules, reference them rather than the libs installed
-ifeq (yes,$(have_kv_submodule))
-kv_lib      := raikv/$(libd)/libraikv.a
-kv_dll      := raikv/$(libd)/libraikv.so
-lnk_lib     += $(kv_lib)
-lnk_dep     += $(kv_lib)
-dlnk_lib    += -Lraikv/$(libd) -lraikv
-dlnk_dep    += $(kv_dll)
-rpath1       = ,-rpath,$(pwd)/raikv/$(libd)
-else
-lnk_lib     += -lraikv
-dlnk_lib    += -lraikv
-endif
-
-ifeq (yes,$(have_md_submodule))
-md_lib      := raimd/$(libd)/libraimd.a
-md_dll      := raimd/$(libd)/libraimd.so
+ifneq (,$(md_home))
+md_lib      := $(md_home)/$(libd)/libraimd.a
+md_dll      := $(md_home)/$(libd)/libraimd.$(dll)
 lnk_lib     += $(md_lib)
 lnk_dep     += $(md_lib)
-dlnk_lib    += -Lraimd/$(libd) -lraimd
+dlnk_lib    += -L$(md_home)/$(libd) -lraimd
 dlnk_dep    += $(md_dll)
-rpath3       = ,-rpath,$(pwd)/raimd/$(libd)
+rpath1       = ,-rpath,$(pwd)/$(md_home)/$(libd)
+includes    += -I$(md_home)/include
 else
 lnk_lib     += -lraimd
 dlnk_lib    += -lraimd
 endif
 
-ifeq (yes,$(have_dec_submodule))
-dec_lib     := raimd/libdecnumber/$(libd)/libdecnumber.a
-dec_dll     := raimd/libdecnumber/$(libd)/libdecnumber.so
+ifneq (,$(dec_home))
+dec_lib     := $(dec_home)/$(libd)/libdecnumber.a
+dec_dll     := $(dec_home)/$(libd)/libdecnumber.$(dll)
 lnk_lib     += $(dec_lib)
 lnk_dep     += $(dec_lib)
-dlnk_lib    += -Lraimd/libdecnumber/$(libd) -ldecnumber
+dlnk_lib    += -L$(dec_home)/$(libd) -ldecnumber
 dlnk_dep    += $(dec_dll)
-rpath5       = ,-rpath,$(pwd)/raimd/libdecnumber/$(libd)
+rpath2       = ,-rpath,$(pwd)/$(dec_home)/$(libd)
+dec_includes = -I$(dec_home)/include
 else
 lnk_lib     += -ldecnumber
 dlnk_lib    += -ldecnumber
 endif
 
-ifeq (yes,$(have_hdr_submodule))
-hdr_lib     := HdrHistogram_c/$(libd)/libhdrhist.a
-hdr_dll     := HdrHistogram_c/$(libd)/libhdrhist.so
-rpath2       = ,-rpath,$(pwd)/HdrHistogram_c/$(libd)
-hdr_includes = -IHdrHistogram_c/src
+ifneq (,$(kv_home))
+kv_lib      := $(kv_home)/$(libd)/libraikv.a
+kv_dll      := $(kv_home)/$(libd)/libraikv.$(dll)
+lnk_lib     += $(kv_lib)
+lnk_dep     += $(kv_lib)
+dlnk_lib    += -L$(kv_home)/$(libd) -lraikv
+dlnk_dep    += $(kv_dll)
+rpath3       = ,-rpath,$(pwd)/$(kv_home)/$(libd)
+includes    += -I$(kv_home)/include
+else
+lnk_lib     += -lraikv
+dlnk_lib    += -lraikv
+endif
+
+ifneq (,$(hdr_home))
+hdr_lib      := $(hdr_home)/$(libd)/libhdrhist.a
+hdr_dll      := $(hdr_home)/$(libd)/libhdrhist.$(dll)
+lnk_lib     += $(hdr_lib)
+lnk_dep     += $(hdr_lib)
+dlnk_lib    += -L$(hdr_home)/$(libd) -lhdrhist
+dlnk_dep    += $(hdr_dll)
+rpath4       = ,-rpath,$(pwd)/$(hdr_home)/$(libd)
+hdr_includes = -I$(hdr_home)/src
 else
 hdr_lib     := -lhdrhist
 hdr_includes = -I/usr/include/hdrhist
@@ -131,48 +173,45 @@ endif
 
 natsmd_lib  := $(libd)/libnatsmd.a
 rpath       := -Wl,-rpath,$(pwd)/$(libd)$(rpath1)$(rpath2)$(rpath3)$(rpath4)$(rpath5)$(rpath6)$(rpath7)
-lnk_lib     += -lpcre2-8 -lcares
-dlnk_lib    += -lpcre2-8 -lcares
-malloc_lib  :=
 
 .PHONY: everything
-everything: $(kv_lib) $(dec_lib) $(md_lib) $(natsmd_lib) $(hdr_lib) all
+everything: $(kv_lib) $(dec_lib) $(md_lib) $(hdr_lib) all
 
 clean_subs :=
 dlnk_dll_depend :=
 dlnk_lib_depend :=
 
 # build submodules if have them
-ifeq (yes,$(have_kv_submodule))
-$(kv_lib) $(kv_dll):
-	$(MAKE) -C raikv
-.PHONY: clean_kv
-clean_kv:
-	$(MAKE) -C raikv clean
-clean_subs += clean_kv
-endif
-ifeq (yes,$(have_dec_submodule))
-$(dec_lib) $(dec_dll):
-	$(MAKE) -C raimd/libdecnumber
-.PHONY: clean_dec
-clean_dec:
-	$(MAKE) -C raimd/libdecnumber clean
-clean_subs += clean_dec
-endif
-ifeq (yes,$(have_md_submodule))
+ifneq (,$(md_home))
 $(md_lib) $(md_dll):
-	$(MAKE) -C raimd
+	$(MAKE) -C $(md_home)
 .PHONY: clean_md
 clean_md:
-	$(MAKE) -C raimd clean
+	$(MAKE) -C $(md_home) clean
 clean_subs += clean_md
 endif
-ifeq (yes,$(have_hdr_submodule))
+ifneq (,$(dec_home))
+$(dec_lib) $(dec_dll):
+	$(MAKE) -C $(dec_home)
+.PHONY: clean_dec
+clean_dec:
+	$(MAKE) -C $(dec_home) clean
+clean_subs += clean_dec
+endif
+ifneq (,$(kv_home))
+$(kv_lib) $(kv_dll):
+	$(MAKE) -C $(kv_home)
+.PHONY: clean_kv
+clean_kv:
+	$(MAKE) -C $(kv_home) clean
+clean_subs += clean_kv
+endif
+ifneq (,$(hdr_home))
 $(hdr_lib) $(hdr_dll):
-	$(MAKE) -C HdrHistogram_c
+	$(MAKE) -C $(hdr_home)
 .PHONY: clean_hdr
 clean_hdr:
-	$(MAKE) -C HdrHistogram_c clean
+	$(MAKE) -C $(hdr_home) clean
 clean_subs += clean_hdr
 endif
 
@@ -205,10 +244,10 @@ libnatsmd_spec  := $(version)-$(build_num)_$(git_hash)
 libnatsmd_ver   := $(major_num).$(minor_num)
 
 $(libd)/libnatsmd.a: $(libnatsmd_objs)
-$(libd)/libnatsmd.so: $(libnatsmd_dbjs) $(dlnk_dep)
+$(libd)/libnatsmd.$(dll): $(libnatsmd_dbjs) $(dlnk_dep)
 
 all_libs    += $(libd)/libnatsmd.a
-all_dlls    += $(libd)/libnatsmd.so
+all_dlls    += $(libd)/libnatsmd.$(dll)
 all_depends += $(libnatsmd_deps)
 
 server_defines := -DNATSMD_VER=$(ver_build)
@@ -221,9 +260,9 @@ natsmd_server_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(natsmd_server_
 natsmd_server_libs  := $(natsmd_lib)
 natsmd_server_lnk   := $(natsmd_lib) $(lnk_lib)
 
-$(bind)/natsmd_server: $(natsmd_server_objs) $(natsmd_server_libs) $(lnk_dep)
+$(bind)/natsmd_server$(exe): $(natsmd_server_objs) $(natsmd_server_libs) $(lnk_dep)
 
-all_exes    += $(bind)/natsmd_server
+all_exes    += $(bind)/natsmd_server$(exe)
 all_depends += $(natsmd_server_deps)
 server_defines := -DNATSMD_VER=$(ver_build)
 
@@ -237,9 +276,9 @@ ping_nats_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(ping_nats_files)))
 ping_nats_libs  :=
 ping_nats_lnk   := $(lnk_lib) $(hdr_lib)
 
-$(bind)/ping_nats: $(ping_nats_objs) $(ping_nats_libs) $(lnk_dep)
+$(bind)/ping_nats$(exe): $(ping_nats_objs) $(ping_nats_libs) $(lnk_dep)
 
-all_exes    += $(bind)/ping_nats
+all_exes    += $(bind)/ping_nats$(exe)
 all_depends += $(ping_nats_deps)
 
 test_map_files := test_map
@@ -249,9 +288,9 @@ test_map_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(test_map_files)))
 test_map_libs  := $(natsmd_lib)
 test_map_lnk   := $(natsmd_lib) $(lnk_lib)
 
-$(bind)/test_map: $(test_map_objs) $(test_map_libs) $(lnk_dep)
+$(bind)/test_map$(exe): $(test_map_objs) $(test_map_libs) $(lnk_dep)
 
-all_exes    += $(bind)/test_map
+all_exes    += $(bind)/test_map$(exe)
 all_depends += $(test_map_deps)
 
 natsmd_client_files := md_client
@@ -261,9 +300,9 @@ natsmd_client_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(natsmd_client_
 natsmd_client_libs  := $(natsmd_lib)
 natsmd_client_lnk   := $(natsmd_lib) $(lnk_lib)
 
-$(bind)/natsmd_client: $(natsmd_client_objs) $(natsmd_client_libs) $(lnk_dep)
+$(bind)/natsmd_client$(exe): $(natsmd_client_objs) $(natsmd_client_libs) $(lnk_dep)
 
-all_exes    += $(bind)/natsmd_client
+all_exes    += $(bind)/natsmd_client$(exe)
 all_depends += $(natsmd_client_deps)
 
 natsmd_pub_files := md_pub
@@ -273,9 +312,9 @@ natsmd_pub_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(natsmd_pub_files)
 natsmd_pub_libs  := $(natsmd_lib)
 natsmd_pub_lnk   := $(natsmd_lib) $(lnk_lib)
 
-$(bind)/natsmd_pub: $(natsmd_pub_objs) $(natsmd_pub_libs) $(lnk_dep)
+$(bind)/natsmd_pub$(exe): $(natsmd_pub_objs) $(natsmd_pub_libs) $(lnk_dep)
 
-all_exes    += $(bind)/natsmd_pub
+all_exes    += $(bind)/natsmd_pub$(exe)
 all_depends += $(natsmd_pub_deps)
 
 all_dirs := $(bind) $(libd) $(objd) $(dependd)
@@ -406,12 +445,12 @@ $(dependd)/depend.make: $(dependd) $(all_depends)
 	@cat $(all_depends) >> $(dependd)/depend.make
 
 .PHONY: dist_bins
-dist_bins: $(all_libs) $(all_dlls) $(bind)/natsmd_server $(bind)/natsmd_client $(bind)/natsmd_pub $(bind)/ping_nats
-	chrpath -d $(libd)/libnatsmd.so
-	chrpath -d $(bind)/natsmd_server
-	chrpath -d $(bind)/natsmd_client
-	chrpath -d $(bind)/natsmd_pub
-	chrpath -d $(bind)/ping_nats
+dist_bins: $(all_libs) $(all_dlls) $(bind)/natsmd_server$(exe) $(bind)/natsmd_client$(exe) $(bind)/natsmd_pub$(exe) $(bind)/ping_nats$(exe)
+	chrpath -d $(libd)/libnatsmd.$(dll)
+	chrpath -d $(bind)/natsmd_server$(exe)
+	chrpath -d $(bind)/natsmd_client$(exe)
+	chrpath -d $(bind)/natsmd_pub$(exe)
+	chrpath -d $(bind)/ping_nats$(exe)
 
 .PHONY: dist_rpm
 dist_rpm: srpm
@@ -438,6 +477,10 @@ install: dist_bins
 	install $$f $(install_prefix)/lib ; \
 	fi ; \
 	done
+	install -m 755 $(bind)/natsmd_server$(exe) $(install_prefix)/bin
+	install -m 755 $(bind)/natsmd_client$(exe) $(install_prefix)/bin
+	install -m 755 $(bind)/natsmd_pub$(exe) $(install_prefix)/bin
+	install -m 755 $(bind)/ping_nats$(exe) $(install_prefix)/bin
 	install -m 644 include/natsmd/*.h $(install_prefix)/include/natsmd
 
 $(objd)/%.o: src/%.cpp
@@ -461,11 +504,17 @@ $(objd)/%.o: test/%.c
 $(libd)/%.a:
 	ar rc $@ $($(*)_objs)
 
-$(libd)/%.so:
-	$(cpplink) $(soflag) $(rpath) $(cflags) -o $@.$($(*)_spec) -Wl,-soname=$(@F).$($(*)_ver) $($(*)_dbjs) $($(*)_dlnk) $(cpp_dll_lnk) $(sock_lib) $(math_lib) $(thread_lib) $(malloc_lib) $(dynlink_lib) && \
+ifeq (Darwin,$(lsb_dist))
+$(libd)/%.dylib:
+	$(cpplink) -dynamiclib $(cflags) -o $@.$($(*)_dylib).dylib -current_version $($(*)_dylib) -compatibility_version $($(*)_ver) $($(*)_dbjs) $($(*)_dlnk) $(sock_lib) $(math_lib) $(thread_lib) $(malloc_lib) $(dynlink_lib) && \
+	cd $(libd) && ln -f -s $(@F).$($(*)_dylib).dylib $(@F).$($(*)_ver).dylib && ln -f -s $(@F).$($(*)_ver).dylib $(@F)
+else
+$(libd)/%.$(dll):
+	$(cpplink) $(soflag) $(rpath) $(cflags) -o $@.$($(*)_spec) -Wl,-soname=$(@F).$($(*)_ver) $($(*)_dbjs) $($(*)_dlnk) $(sock_lib) $(math_lib) $(thread_lib) $(malloc_lib) $(dynlink_lib) && \
 	cd $(libd) && ln -f -s $(@F).$($(*)_spec) $(@F).$($(*)_ver) && ln -f -s $(@F).$($(*)_ver) $(@F)
+endif
 
-$(bind)/%:
+$(bind)/%$(exe):
 	$(cpplink) $(cflags) $(rpath) -o $@ $($(*)_objs) -L$(libd) $($(*)_lnk) $(cpp_lnk) $(sock_lib) $(math_lib) $(thread_lib) $(malloc_lib) $(dynlink_lib)
 
 $(bind)/%.static:
