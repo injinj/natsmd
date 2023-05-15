@@ -100,16 +100,20 @@ struct SidEntry {
             msg_cnt;    /* count of msgs at start of subscribe */
   uint32_t  subj_hash,  /* hash of subject or pattern */
             pref_hash,  /* hash of pattern prefix */
+            que_hash,   /* hash of queue group */
             hash;       /* hash of the sid string */
   uint16_t  len;        /* len of sid */
   char      value[ 2 ]; /* the sid value */
 
-  void init( uint32_t h,  uint32_t pre_h = 0 ) {
+  void init( uint32_t sub_h,  uint32_t pre_h,  uint32_t que_h ) {
     this->max_msgs  = 0;
     this->msg_cnt   = 0;
-    this->subj_hash = h;
+    this->subj_hash = sub_h;
     this->pref_hash = pre_h;
+    this->que_hash  = que_h;
   }
+  bool is_wild( void ) { return this->pref_hash != 0; }
+  bool is_que( void )  { return this->que_hash != 0;  }
   void print( void ) noexcept;
 };
 
@@ -198,6 +202,7 @@ struct NatsSubData {
   }
   void print_sids( void ) noexcept;
 };
+
 struct NatsSubRoute : public NatsSubData {
   static bool equals( const NatsSubRoute &r, const void *s, uint16_t l ) {
     return r.NatsSubData::equals( s, l );
@@ -258,13 +263,15 @@ struct NatsLookup {
   NatsWildMatch    * match,
                    * next;
   kv::RouteLoc       loc;
-  uint32_t           hash;
+  uint32_t           hash,
+                     que_hash;
   void init( uint32_t h = 0 ) {
-    this->rt    = NULL;
-    this->pat   = NULL;
-    this->match = NULL;
-    this->next  = NULL;
-    this->hash  = h;
+    this->rt       = NULL;
+    this->pat      = NULL;
+    this->match    = NULL;
+    this->next     = NULL;
+    this->hash     = h;
+    this->que_hash = 0;
   }
 };
 
@@ -327,30 +334,44 @@ struct NatsPatternTab : public kv::RouteVec<NatsPatternRoute> {
 };
 
 struct NatsSubMap {
-  NatsSubTab             sub_tab;
-  NatsPatternTab         pat_tab;
+  NatsSubTab             sub_tab,
+                         qsub_tab;
+  NatsPatternTab         pat_tab,
+                         qpat_tab;
   kv::RouteVec<SidEntry> sid_tab;
 
   void print( void ) noexcept;
   /* add a subject and sid */
   NatsSubStatus put( NatsStr &subj,  NatsStr &sid,  bool &collision,
                      NatsSubRoute *&sub_rt ) {
+    return this->put_sub( subj, sid, collision, sub_rt, 0, this->sub_tab );
+  }
+  NatsSubStatus put_que( NatsStr &subj,  NatsStr &sid,  bool &collision,
+                         NatsSubRoute *&sub_rt,  uint32_t quehash ) {
+    return this->put_sub( subj, sid, collision, sub_rt, quehash,
+                          this->qsub_tab );
+  }
+  NatsSubStatus put_sub( NatsStr &subj,  NatsStr &sid,  bool &collision,
+                         NatsSubRoute *&sub_rt,  uint32_t quehash,
+                         NatsSubTab &tab ) {
     kv::RouteLoc   loc;
     SidEntry     * entry;
     NatsSubRoute * rt;
-    uint32_t       hcnt;
+    uint32_t       hcnt, subj_hash = subj.hash();
 
-    entry = this->sid_tab.upsert( sid.hash(), sid.str, sid.len, loc );
+    sub_rt = NULL;
+    entry  = this->sid_tab.upsert( sid.hash(), sid.str, sid.len, loc );
     if ( entry == NULL || ! loc.is_new ) {
       if ( entry != NULL ) {
-        rt = this->sub_tab.find( subj.hash(), subj.str, subj.len );
+        rt = tab.find( subj_hash, subj.str, subj.len );
         if ( rt != NULL && rt->match_sid( *entry ) )
           sub_rt = rt;
       }
       return NATS_EXISTS;
     }
-    entry->init( subj.hash() );
-    rt = this->sub_tab.upsert2( subj.hash(), subj.str, subj.len, loc, hcnt );
+    entry->init( subj_hash, 0, quehash );
+
+    rt = tab.upsert2( subj_hash, subj.str, subj.len, loc, hcnt );
     if ( loc.is_new ) {
       rt->init( subj.len );
       collision = ( hcnt > 0 );
@@ -361,14 +382,11 @@ struct NatsSubMap {
     }
     if ( ! rt->add_sid( sid ) ) {
       size_t newlen = (size_t) rt->sid_off + (size_t) sid.len + 2;
-      if ( newlen > 0xffffU )
-        rt = NULL;
-      else
-        rt = this->sub_tab.resize( subj.hash(), subj.str, (size_t) subj.len,
-                                   newlen, loc );
+      rt = ( newlen > 0xffffU ? NULL :
+        tab.resize( subj_hash, subj.str, (size_t) subj.len, newlen, loc ) );
       if ( rt == NULL ) {
         if ( loc.is_new )
-          this->sub_tab.remove( loc );
+          tab.remove( loc );
         return NATS_TOO_MANY;
       }
       rt->add_sid( sid );
@@ -380,6 +398,19 @@ struct NatsSubMap {
   NatsSubStatus put_wild( NatsStr &subj,  kv::PatternCvt &cvt,
                           NatsStr &pre,  NatsStr &sid,  bool &collision,
                           NatsWildMatch *&sub_m ) {
+    return this->put_wild_sub( subj, cvt, pre, sid, collision, sub_m, 0,
+                               this->pat_tab );
+  }
+  NatsSubStatus put_wild_que( NatsStr &subj,  kv::PatternCvt &cvt,
+                              NatsStr &pre,  NatsStr &sid,  bool &collision,
+                              NatsWildMatch *&sub_m,  uint32_t quehash ) {
+    return this->put_wild_sub( subj, cvt, pre, sid, collision, sub_m, quehash,
+                               this->qpat_tab );
+  }
+  NatsSubStatus put_wild_sub( NatsStr &subj,  kv::PatternCvt &cvt,
+                              NatsStr &pre,  NatsStr &sid,  bool &collision,
+                              NatsWildMatch *&sub_m,  uint32_t quehash,
+                              NatsPatternTab &ptab ) {
     kv::RouteLoc       loc;
     SidEntry         * entry;
     NatsWildMatch    * m = NULL, * m2;
@@ -389,7 +420,7 @@ struct NatsSubMap {
     entry = this->sid_tab.upsert( sid.hash(), sid.str, sid.len, loc );
     if ( entry == NULL || ! loc.is_new ) {
       if ( entry != NULL ) {
-        rt = this->pat_tab.find( pre.hash(), pre.str, pre.len );
+        rt = ptab.find( pre.hash(), pre.str, pre.len );
         if ( rt != NULL ) {
           for ( m = rt->list.hd; m != NULL; m = m->next ) {
             if ( m->equals( subj ) )
@@ -401,9 +432,9 @@ struct NatsSubMap {
       }
       return NATS_EXISTS;
     }
-    entry->init( subj.hash(), pre.hash() );
+    entry->init( subj.hash(), pre.hash(), quehash );
 
-    rt = this->pat_tab.upsert2( pre.hash(), pre.str, pre.len, loc, hcnt );
+    rt = ptab.upsert2( pre.hash(), pre.str, pre.len, loc, hcnt );
     if ( loc.is_new ) {
       rt->init();
       collision = ( hcnt > 0 );
@@ -420,7 +451,7 @@ struct NatsSubMap {
       m = NatsWildMatch::create( subj, sid, cvt );
       if ( m == NULL ) {
         if ( loc.is_new )
-          this->pat_tab.remove( loc );
+          ptab.remove( loc );
         return NATS_BAD_PATTERN;
       }
       rt->list.push_hd( m );
@@ -446,80 +477,89 @@ struct NatsSubMap {
   /* unsubscribe an sid */
   NatsSubStatus unsub( NatsStr &sid,  uint64_t max_msgs,  NatsLookup &look,
                        bool &collision ) {
-    kv::RouteLoc   sid_loc;
-    SidEntry     * entry;
-    NatsSubStatus  status;
-    uint32_t       count = 0;
-
+    kv::RouteLoc sid_loc;
+    SidEntry   * entry;
     look.init();
     collision = false;
     entry = this->sid_tab.find( sid.hash(), sid.str, sid.len, sid_loc );
     if ( entry == NULL )
       return NATS_NOT_FOUND;
-    if ( entry->pref_hash == 0 ) {
-      look.hash = entry->subj_hash;
-      look.rt = this->sub_tab.find_by_hash( look.hash, look.loc );
+    look.que_hash = entry->que_hash;
+    if ( entry->is_wild() )
+      return this->unsub_wild( max_msgs, look, collision, *entry, sid_loc,
+                            entry->is_que() ? this->qpat_tab : this->pat_tab );
+    return this->unsub_sub( max_msgs, look, collision, *entry, sid_loc,
+                            entry->is_que() ? this->qsub_tab : this->sub_tab );
+  }
+
+  NatsSubStatus unsub_sub( uint64_t max_msgs,  NatsLookup &look,
+                           bool &collision,  SidEntry &entry,
+                           kv::RouteLoc &sid_loc,  NatsSubTab &tab ) {
+    NatsSubStatus  status;
+    look.hash = entry.subj_hash;
+    look.rt   = tab.find_by_hash( look.hash, look.loc );
+    if ( look.rt == NULL )
+      return NATS_NOT_FOUND;
+    for ( uint32_t count = 0 ; ; ) {
+      status = look.rt->unsub( entry, max_msgs );
+      if ( status != NATS_NOT_FOUND ) {
+        if ( status == NATS_EXPIRED ) {
+          this->sid_tab.remove( sid_loc );
+          if ( look.rt->refcnt == 0 ) {
+            if ( count > 0 )
+              collision = true;
+            else {
+              kv::RouteLoc next = look.loc;
+              if ( tab.find_next_by_hash( look.hash, next ) != NULL )
+                collision = true;
+            }
+            return NATS_EXPIRED;
+          }
+        }
+        return NATS_OK;
+      }
+      look.rt = tab.find_next_by_hash( look.hash, look.loc );
       if ( look.rt == NULL )
         return NATS_NOT_FOUND;
-      for (;;) {
-        status = look.rt->unsub( *entry, max_msgs );
-        if ( status != NATS_NOT_FOUND ) {
-          if ( status == NATS_EXPIRED ) {
-            this->sid_tab.remove( sid_loc );
-            if ( look.rt->refcnt == 0 ) {
-              if ( count > 0 )
-                collision = true;
-              else {
-                kv::RouteLoc next = look.loc;
-                if ( this->sub_tab.find_next_by_hash( look.hash,
-                                                      next ) != NULL )
-                  collision = true;
-              }
-              return NATS_EXPIRED;
-            }
-          }
-          return NATS_OK;
-        }
-        look.rt = this->sub_tab.find_next_by_hash( look.hash, look.loc );
-        if ( look.rt == NULL )
-          return NATS_NOT_FOUND;
-        count++;
-      }
+      count++;
     }
-    else {
-      look.hash = entry->pref_hash;
-      look.pat = this->pat_tab.find_by_hash( look.hash, look.loc );
+  }
+
+  NatsSubStatus unsub_wild( uint64_t max_msgs,  NatsLookup &look,
+                            bool &collision,  SidEntry &entry,
+                            kv::RouteLoc &sid_loc,  NatsPatternTab &ptab ) {
+    NatsSubStatus  status;
+    look.hash = entry.pref_hash;
+    look.pat  = ptab.find_by_hash( look.hash, look.loc );
+    if ( look.pat == NULL )
+      return NATS_NOT_FOUND;
+    for ( uint32_t count = 0; ; ) {
+      for ( NatsWildMatch *m = look.pat->list.hd; m != NULL; m = m->next ) {
+        if ( m->hash == entry.subj_hash ) {
+          status = m->unsub( entry, max_msgs );
+          if ( status != NATS_NOT_FOUND ) {
+            look.match = m;
+            if ( status == NATS_EXPIRED ) {
+              this->sid_tab.remove( sid_loc );
+              if ( m->refcnt == 0 ) {
+                if ( count > 0 || look.pat->count > 1 )
+                  collision = true;
+                else {
+                  kv::RouteLoc next = look.loc;
+                  if ( ptab.find_next_by_hash( look.hash, next ) != NULL )
+                    collision = true;
+                }
+                return NATS_EXPIRED;
+              }
+            }
+            return NATS_OK;
+          }
+        }
+      }
+      look.pat = ptab.find_next_by_hash( look.hash, look.loc );
       if ( look.pat == NULL )
         return NATS_NOT_FOUND;
-      for (;;) {
-        for ( NatsWildMatch *m = look.pat->list.hd; m != NULL; m = m->next ) {
-          if ( m->hash == entry->subj_hash ) {
-            status = m->unsub( *entry, max_msgs );
-            if ( status != NATS_NOT_FOUND ) {
-              look.match = m;
-              if ( status == NATS_EXPIRED ) {
-                this->sid_tab.remove( sid_loc );
-                if ( m->refcnt == 0 ) {
-                  if ( count > 0 || look.pat->count > 1 )
-                    collision = true;
-                  else {
-                    kv::RouteLoc next = look.loc;
-                    if ( this->pat_tab.find_next_by_hash( look.hash,
-                                                          next ) != NULL )
-                      collision = true;
-                  }
-                  return NATS_EXPIRED;
-                }
-              }
-              return NATS_OK;
-            }
-          }
-        }
-        look.pat = this->pat_tab.find_next_by_hash( look.hash, look.loc );
-        if ( look.pat == NULL )
-          return NATS_NOT_FOUND;
-        count++;
-      }
+      count++;
     }
   }
   /* find subj by sid */
@@ -533,7 +573,8 @@ struct NatsSubMap {
       return NATS_NOT_FOUND;
 
     look.hash = entry->subj_hash;
-    look.rt = this->sub_tab.find_by_hash( look.hash, look.loc );
+    if ( ! entry->is_que() )
+      look.rt = this->sub_tab.find_by_hash( look.hash, look.loc );
     if ( look.rt == NULL )
       return NATS_NOT_FOUND;
     for (;;) {
@@ -547,7 +588,9 @@ struct NatsSubMap {
   /* remove after unsubscribe */
   void unsub_remove( NatsLookup &look ) {
     if ( look.rt != NULL && look.rt->refcnt == 0 ) {
-      this->sub_tab.remove( look.loc );
+      NatsSubTab & tab = ( look.que_hash == 0 ? this->sub_tab :
+                                                this->qsub_tab );
+      tab.remove( look.loc );
       look.rt = NULL;
     }
     else if ( look.match != NULL && look.match->refcnt == 0 ) {
@@ -555,7 +598,9 @@ struct NatsSubMap {
       delete look.match;
       look.match = NULL;
       if ( --look.pat->count == 0 ) {
-        this->pat_tab.remove( look.loc );
+        NatsPatternTab & ptab = ( look.que_hash == 0 ? this->pat_tab :
+                                                       this->qpat_tab );
+        ptab.remove( look.loc );
         look.pat = NULL;
       }
     }
@@ -590,10 +635,12 @@ struct NatsSubMap {
   NatsSubStatus expired( NatsLookup &look,  bool &collision ) {
     collision = false;
     if ( this->expire_sids( *look.rt ) ) {
+      NatsSubTab & tab = ( look.que_hash == 0 ? this->sub_tab :
+                                                this->qsub_tab );
       kv::RouteLoc loc;
       /* one of these is the current subject */
-      if ( this->sub_tab.find_by_hash( look.hash, loc ) != NULL &&
-           this->sub_tab.find_next_by_hash( look.hash, loc ) != NULL )
+      if ( tab.find_by_hash( look.hash, loc ) != NULL &&
+           tab.find_next_by_hash( look.hash, loc ) != NULL )
         collision = true;
       return NATS_EXPIRED;
     }
@@ -602,13 +649,15 @@ struct NatsSubMap {
   NatsSubStatus expired_pattern( NatsLookup &look,  bool &collision ) {
     collision = false;
     if ( this->expire_sids( *look.match ) ) {
+      NatsPatternTab & ptab = ( look.que_hash == 0 ? this->pat_tab :
+                                                     this->qpat_tab );
       kv::RouteLoc loc;
       /* if multiple patterns with the same prefix */
       if ( look.pat->count > 1 )
         collision = true;
       /* one of these is the current subject */
-      else if ( this->pat_tab.find_by_hash( look.hash, loc ) != NULL &&
-                this->pat_tab.find_next_by_hash( look.hash, loc ) != NULL )
+      else if ( ptab.find_by_hash( look.hash, loc ) != NULL &&
+                ptab.find_next_by_hash( look.hash, loc ) != NULL )
         collision = true;
       return NATS_EXPIRED;
     }
@@ -618,8 +667,12 @@ struct NatsSubMap {
   NatsSubStatus lookup_publish( NatsStr &subj,  NatsLookup &look ) {
     look.init( subj.hash() );
     look.rt = this->sub_tab.find( look.hash, subj.str, subj.len, look.loc );
-    if ( look.rt == NULL )
-      return NATS_NOT_FOUND;
+    if ( look.rt == NULL ) {
+      look.rt = this->qsub_tab.find( look.hash, subj.str, subj.len, look.loc );
+      if ( look.rt == NULL )
+        return NATS_NOT_FOUND;
+      look.que_hash = look.hash;
+    }
     if ( ++look.rt->msg_cnt == look.rt->max_msgs )
       return NATS_EXPIRED;
     return NATS_OK;
@@ -629,18 +682,28 @@ struct NatsSubMap {
                                 NatsLookup &look ) {
     look.init( pre.hash() );
     look.pat = this->pat_tab.find( look.hash, pre.str, pre.len, look.loc );
-    if ( look.pat == NULL )
-      return NATS_NOT_FOUND;
-    for ( NatsWildMatch *m = look.pat->list.hd; m != NULL; m = m->next ) {
-      if ( m->re == NULL || m->match( subj ) ) {
-        look.match = m;
-        look.next  = m->next;
-        if ( ++m->msg_cnt == m->max_msgs )
-          return NATS_EXPIRED;
-        return NATS_OK;
+    for (;;) {
+      if ( look.pat != NULL ) {
+        for ( NatsWildMatch *m = look.pat->list.hd; m != NULL; m = m->next ) {
+          if ( m->re == NULL || m->match( subj ) ) {
+            look.match = m;
+            look.next  = m->next;
+            if ( ++m->msg_cnt == m->max_msgs )
+              return NATS_EXPIRED;
+            return NATS_OK;
+          }
+        }
+      }
+      if ( look.que_hash == 0 ) {
+        look.pat = this->qpat_tab.find( look.hash, pre.str, pre.len, look.loc );
+        if ( look.pat == NULL )
+          return NATS_NOT_FOUND;
+        look.que_hash = look.hash;
+      }
+      else {
+        return NATS_NOT_FOUND;
       }
     }
-    return NATS_NOT_FOUND;
   }
   /* find the next patter to publish after above, may match multiple */
   NatsSubStatus lookup_next( NatsStr &subj,  NatsLookup &look ) {
@@ -656,21 +719,27 @@ struct NatsSubMap {
     return NATS_NOT_FOUND;
   }
   void release( void ) {
+    this->release_pat_tab( this->pat_tab );
+    this->release_pat_tab( this->qpat_tab );
+    this->sid_tab.release();
+    this->sub_tab.release();
+    this->qsub_tab.release();
+    this->pat_tab.release();
+    this->qpat_tab.release();
+  }
+  void release_pat_tab( NatsPatternTab &ptab ) {
     kv::RouteLoc       loc;
     NatsPatternRoute * rt;
     NatsWildMatch    * m,
                      * next;
-    if ( (rt = this->pat_tab.first( loc )) != NULL ) {
+    if ( (rt = ptab.first( loc )) != NULL ) {
       do {
         for ( m = rt->list.hd; m != NULL; m = next ) {
           next = m->next;
           delete m;
         }
-      } while ( (rt = this->pat_tab.next( loc )) != NULL );
+      } while ( (rt = ptab.next( loc )) != NULL );
     }
-    this->sid_tab.release();
-    this->sub_tab.release();
-    this->pat_tab.release();
   }
 };
 

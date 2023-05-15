@@ -227,19 +227,22 @@ struct EvNatsClient : public kv::EvConnection, public kv::RouteNotify {
   uint32_t remove_sid( uint32_t h,  const char *sub,  size_t sublen ) noexcept;
   /* RouteNotify */
   /* a new subscription */
-  void do_sub( uint32_t h,  const char *sub,  size_t sublen ) noexcept;
+  void do_sub( uint32_t h,  const char *sub,  size_t sublen,
+               const char *queue,  size_t queue_len ) noexcept;
   virtual void on_sub( kv::NotifySub &sub ) noexcept;
   const char * is_wildcard( const char *subject,  size_t subject_len ) noexcept;
-  void subscribe( const char *subject,  size_t subject_len ) noexcept;
+  void subscribe( const char *subject,  size_t subject_len,
+                  const char *queue,  size_t queue_len ) noexcept;
   /* an unsubscribed sub */
   void do_unsub( uint32_t h,  const char *sub,  size_t sublen ) noexcept;
   virtual void on_unsub( kv::NotifySub &sub ) noexcept;
   void unsubscribe( const char *subject,  size_t subject_len ) noexcept;
   /* a new pattern subscription */
-  void do_psub( uint32_t h,  const char *prefix,  uint8_t prefix_len ) noexcept;
+  void do_psub( uint32_t h,  const char *prefix,  size_t prefix_len,
+                const char *queue,  size_t queue_len ) noexcept;
   virtual void on_psub( kv::NotifyPattern &pat ) noexcept;
   /* an unsubscribed pattern sub */
-  void do_punsub( uint32_t h, const char *prefix, uint8_t prefix_len ) noexcept;
+  void do_punsub( uint32_t h, const char *prefix, size_t prefix_len ) noexcept;
   virtual void on_punsub( kv::NotifyPattern &pat ) noexcept;
   /* reassert subs after reconnect */
   virtual void on_reassert( uint32_t fd,  kv::RouteVec<kv::RouteSub> &sub_db,

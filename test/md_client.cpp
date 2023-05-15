@@ -33,6 +33,8 @@ struct NatsDataCallback : public EvConnectionNotify, public NatsClientCB,
   MDDict       * dict;            /* dictinary to use for decoding msgs */
   const char  ** sub;             /* subject strings */
   size_t         sub_count;       /* count of sub[] */
+  const char   * queue;
+  size_t         queue_len;
   uint64_t       msg_count,
                  last_count,
                  last_time,
@@ -45,8 +47,9 @@ struct NatsDataCallback : public EvConnectionNotify, public NatsClientCB,
                  show_rate;
 
   NatsDataCallback( EvPoll &p,  EvNatsClient &c,  const char **s,  size_t cnt,
-                    bool nodict,  bool hex,  bool rate )
+                    const char *q,  bool nodict,  bool hex,  bool rate )
     : poll( p ), client( c ), dict( 0 ), sub( s ), sub_count( cnt ),
+      queue( q ), queue_len( q ? ::strlen( q ) : 0 ),
       msg_count( 0 ), last_count( 0 ), last_time( 0 ), msg_bytes( 0 ),
       last_bytes( 0 ), no_dictionary( nodict ), is_subscribed( false ),
       have_dictionary( false ), dump_hex( hex ), show_rate( rate ) {}
@@ -98,7 +101,8 @@ NatsDataCallback::start_subscriptions( void ) noexcept
     /* subscribe with inbox reply */
     printf( "Subscribe \"%s\"\n", this->sub[ i ] );
     size_t sub_len = ::strlen( this->sub[ i ] );
-    this->client.subscribe( this->sub[ i ], sub_len );
+    this->client.subscribe( this->sub[ i ], sub_len,
+                            this->queue, this->queue_len );
   }
   if ( this->show_rate ) {
     this->last_time = this->poll.current_coarse_ns();
@@ -275,6 +279,7 @@ main( int argc, const char *argv[] )
              * nodict  = get_arg( x, argc, argv, 0, "-x", "-nodict", NULL ),
              * dump    = get_arg( x, argc, argv, 0, "-e", "-hex", NULL ),
              * rate    = get_arg( x, argc, argv, 0, "-r", "-rate", NULL ),
+             * queue   = get_arg( x, argc, argv, 1, "-q", "-queue", NULL ),
              * help    = get_arg( x, argc, argv, 0, "-h", "-help", 0 );
   int first_sub = x, idle_count = 0;
 
@@ -305,7 +310,7 @@ main( int argc, const char *argv[] )
   EvNatsClientParameters parm( host, name, user, pass, token );
   EvNatsClient           conn( poll );
   NatsDataCallback       data( poll, conn, &argv[ first_sub ], argc - first_sub,
-                               nodict != NULL, dump != NULL, rate != NULL );
+                            queue, nodict != NULL, dump != NULL, rate != NULL );
   /* load dictionary if present */
   if ( ! data.no_dictionary ) {
     if ( path != NULL || (path = ::getenv( "cfile_path" )) != NULL ) {

@@ -470,13 +470,24 @@ EvNatsService::add_sub( NatsMsg &msg ) noexcept
                preflen   = this->prefix_len;
   char       * inbox     = NULL;
   size_t       inbox_len = 0;
+  const char * que       = msg.queue;
+  size_t       quelen    = msg.queue_len;
+  uint32_t     quehash   = 0;
 
   if ( preflen > 0 ) {
-    CatPtr tmp( this->alloc_temp( sublen + preflen ) );
-    tmp.x( this->prefix, preflen ).x( sub, sublen );
+    CatPtr tmp( this->alloc_temp( sublen + preflen + 1 ) );
+    tmp.x( this->prefix, preflen ).x( sub, sublen ).end();
     sub     = tmp.start;
     sublen += preflen;
+    if ( quelen > 0 ) {
+      CatPtr tmp( this->alloc_temp( quelen + preflen + 1 ) );
+      tmp.x( this->prefix, preflen ).x( que, quelen ).end();
+      que     = tmp.start;
+      quelen += preflen;
+    }
   }
+  if ( quelen > 0 )
+    quehash = kv_crc_c( que, quelen, 0 );
 
   NatsStr sid( msg.sid, msg.sid_len );
   NatsStr subj( sub, sublen );
@@ -496,16 +507,27 @@ EvNatsService::add_sub( NatsMsg &msg ) noexcept
                              this->sub_route.prefix_seed( cvt.prefixlen ) );
       NatsStr pre( subj.str, cvt.prefixlen, h );
       NatsWildMatch * sub_m = NULL;
-      status = this->map.put_wild( subj, cvt, pre, sid, coll, sub_m );
+      if ( quelen == 0 )
+        status = this->map.put_wild( subj, cvt, pre, sid, coll, sub_m );
+      else
+        status = this->map.put_wild_que( subj, cvt, pre, sid, coll, sub_m,
+                                         quehash );
       if ( status == NATS_IS_NEW || status == NATS_OK ||
            ( status == NATS_EXISTS && sub_m != NULL ) ) {
-        NotifyPattern npat( cvt, subj.str, subj.len, h,
-                            coll, 'N', *this );
-        if ( status == NATS_IS_NEW )
-          this->sub_route.add_pat( npat );
+        NotifyPatternQueue npat( cvt, subj.str, subj.len, h,
+                                 coll, 'N', *this, que, quelen, quehash );
+        if ( status == NATS_IS_NEW ) {
+          if ( quelen == 0 )
+            this->sub_route.add_pat( npat );
+          else
+            this->sub_route.add_pat_queue( npat );
+        }
         else {
           npat.sub_count = sub_m->refcnt;
-          this->sub_route.notify_pat( npat );
+          if ( quelen == 0 )
+            this->sub_route.notify_pat( npat );
+          else
+            this->sub_route.notify_pat_queue( npat );
         }
       }
     }
@@ -523,16 +545,26 @@ EvNatsService::add_sub( NatsMsg &msg ) noexcept
     }
 
     NatsSubRoute * sub_rt = NULL;
-    status = this->map.put( subj, sid, coll, sub_rt );
+    if ( quelen == 0 )
+      status = this->map.put( subj, sid, coll, sub_rt );
+    else
+      status = this->map.put_que( subj, sid, coll, sub_rt, quehash );
     if ( status == NATS_IS_NEW || status == NATS_OK ||
          ( status == NATS_EXISTS && sub_rt != NULL ) ) {
-      NotifySub nsub( subj.str, subj.len, inbox, inbox_len, subj.hash(),
-                      coll, 'N', *this );
-      if ( status == NATS_IS_NEW )
-        this->sub_route.add_sub( nsub );
+      NotifyQueue nsub( subj.str, subj.len, inbox, inbox_len, subj.hash(),
+                        coll, 'N', *this, que, quelen, quehash );
+      if ( status == NATS_IS_NEW ) {
+        if ( quelen == 0 )
+          this->sub_route.add_sub( nsub );
+        else
+          this->sub_route.add_sub_queue( nsub );
+      }
       else {
         nsub.sub_count = sub_rt->refcnt;
-        this->sub_route.notify_sub( nsub );
+        if ( quelen == 0 )
+          this->sub_route.notify_sub( nsub );
+        else
+          this->sub_route.notify_sub_queue( nsub );
       }
     }
   }
@@ -553,29 +585,41 @@ EvNatsService::rem_sid( NatsMsg &msg ) noexcept
   status = this->map.unsub( sid, msg.max_msgs, look, coll );
   if ( status != NATS_NOT_FOUND ) {
     if ( look.rt != NULL ) {
-      NotifySub nsub( look.rt->value, look.rt->subj_len, look.hash,
-                      coll, 'N', *this );
+      NotifyQueue nsub( look.rt->value, look.rt->subj_len, NULL, 0, look.hash,
+                        coll, 'N', *this, NULL, 0, look.que_hash );
       if ( status == NATS_EXPIRED ) {
-        this->sub_route.del_sub( nsub );
+        if ( look.que_hash == 0 )
+          this->sub_route.del_sub( nsub );
+        else
+          this->sub_route.del_sub_queue( nsub );
         map.unsub_remove( look );
       }
       else {
         nsub.sub_count = look.rt->refcnt;
-        this->sub_route.notify_unsub( nsub );
+        if ( look.que_hash == 0 )
+          this->sub_route.notify_unsub( nsub );
+        else
+          this->sub_route.notify_unsub_queue( nsub );
       }
     }
     else {
       PatternCvt cvt;
       if ( cvt.convert_rv( look.match->value, look.match->subj_len ) == 0 ) {
-        NotifyPattern npat( cvt, look.match->value, look.match->subj_len,
-                            look.hash, coll, 'N', *this );
+        NotifyPatternQueue npat( cvt, look.match->value, look.match->subj_len,
+                          look.hash, coll, 'N', *this, NULL, 0, look.que_hash );
         if ( status == NATS_EXPIRED ) {
-          this->sub_route.del_pat( npat );
+          if ( look.que_hash == 0 )
+            this->sub_route.del_pat( npat );
+          else
+            this->sub_route.del_pat_queue( npat );
           map.unsub_remove( look );
         }
         else {
           npat.sub_count = look.match->refcnt;
-          this->sub_route.notify_unpat( npat );
+          if ( look.que_hash == 0 )
+            this->sub_route.notify_unpat( npat );
+          else
+            this->sub_route.notify_unpat_queue( npat );
         }
       }
     }
@@ -586,16 +630,30 @@ void
 EvNatsService::rem_all_sub( void ) noexcept
 {
   RouteLoc           loc;
+  NatsStr            sid;
   NatsSubRoute     * r;
   NatsPatternRoute * p;
+  SidEntry         * entry;
 
-  for ( r = this->map.sub_tab.first( loc ); r;
+  for ( r = this->map.sub_tab.first( loc ); r != NULL;
         r = this->map.sub_tab.next( loc ) ) {
     bool coll = this->map.sub_tab.rem_collision( r );
     NotifySub nsub( r->value, r->subj_len, r->hash, coll, 'N', *this );
     this->sub_route.del_sub( nsub );
   }
-  for ( p = this->map.pat_tab.first( loc ); p;
+  for ( r = this->map.qsub_tab.first( loc ); r != NULL;
+        r = this->map.qsub_tab.next( loc ) ) {
+    bool coll = this->map.qsub_tab.rem_collision( r );
+    for ( bool b = r->first_sid( sid ); b; b = r->next_sid( sid ) ) {
+      entry = this->map.sid_tab.find( sid.hash(), sid.str, sid.len );
+      if ( entry != NULL && entry->que_hash != 0 ) {
+        NotifyQueue nsub( r->value, r->subj_len, NULL, 0, r->hash, coll,
+                          'N', *this, NULL, 0, entry->que_hash );
+        this->sub_route.del_sub_queue( nsub );
+      }
+    }
+  }
+  for ( p = this->map.pat_tab.first( loc ); p != NULL;
         p = this->map.pat_tab.next( loc ) ) {
     for ( NatsWildMatch *m = p->list.hd; m != NULL; m = m->next ) {
       PatternCvt cvt;
@@ -604,6 +662,23 @@ EvNatsService::rem_all_sub( void ) noexcept
         NotifyPattern npat( cvt, m->value, m->subj_len, p->hash,
                             coll, 'N', *this );
         this->sub_route.del_pat( npat );
+      }
+    }
+  }
+  for ( p = this->map.qpat_tab.first( loc ); p != NULL;
+        p = this->map.qpat_tab.next( loc ) ) {
+    for ( NatsWildMatch *m = p->list.hd; m != NULL; m = m->next ) {
+      PatternCvt cvt;
+      if ( cvt.convert_rv( m->value, m->subj_len ) == 0 ) {
+        bool coll = this->map.qpat_tab.rem_collision( p, m );
+        for ( bool b = m->first_sid( sid ); b; b = m->next_sid( sid ) ) {
+          entry = this->map.sid_tab.find( sid.hash(), sid.str, sid.len );
+          if ( entry != NULL && entry->que_hash != 0 ) {
+            NotifyPatternQueue npat( cvt, m->value, m->subj_len, p->hash,
+                                  coll, 'N', *this, NULL, 0, entry->que_hash );
+            this->sub_route.del_pat_queue( npat );
+          }
+        }
       }
     }
   }
@@ -618,13 +693,13 @@ EvNatsService::fwd_pub( NatsMsg &msg ) noexcept
   size_t    sublen = msg.subject_len,
             replen = msg.reply_len;
   if ( preflen > 0 ) {
-    CatPtr tmp( this->alloc_temp( sublen + preflen ) );
-    tmp.x( this->prefix, preflen ).x( sub, sublen );
+    CatPtr tmp( this->alloc_temp( sublen + preflen + 1 ) );
+    tmp.x( this->prefix, preflen ).x( sub, sublen ).end();
     sub     = tmp.start;
     sublen += preflen;
     if ( replen > 0 ) {
-      CatPtr tmp( this->alloc_temp( replen + preflen ) );
-      tmp.x( this->prefix, preflen ).x( rep, replen );
+      CatPtr tmp( this->alloc_temp( replen + preflen + 1 ) );
+      tmp.x( this->prefix, preflen ).x( rep, replen ).end();
       rep     = tmp.start;
       replen += preflen;
     }
@@ -671,14 +746,21 @@ EvNatsService::on_msg( EvPublish &pub ) noexcept
         }
         if ( status == NATS_EXPIRED ) {
           status = this->map.expired( look, coll );
-          NotifySub nsub( subj.str, subj.len, h, coll, 'N', *this );
+          NotifyQueue nsub( subj.str, subj.len, NULL, 0, h, coll, 'N', *this,
+                            NULL, 0, look.que_hash );
           if ( status == NATS_EXPIRED ) {
-            this->sub_route.del_sub( nsub );
+            if ( look.que_hash == 0 )
+              this->sub_route.del_sub( nsub );
+            else
+              this->sub_route.del_sub_queue( nsub );
             this->map.unsub_remove( look );
           }
           else {
             nsub.sub_count = look.rt->refcnt;
-            this->sub_route.notify_unsub( nsub );
+            if ( look.que_hash == 0 )
+              this->sub_route.notify_unsub( nsub );
+            else
+              this->sub_route.notify_unsub_queue( nsub );
           }
         }
       }
@@ -700,17 +782,23 @@ EvNatsService::on_msg( EvPublish &pub ) noexcept
         if ( status == NATS_EXPIRED ) {
           status = this->map.expired_pattern( look, coll );
           PatternCvt cvt;
-          NotifyPattern npat( cvt, look.match->value, look.match->subj_len,
-                              h, coll, 'N', *this );
+          NotifyPatternQueue npat( cvt, look.match->value, look.match->subj_len,
+                                  h, coll, 'N', *this, NULL, 0, look.que_hash );
           if ( cvt.convert_rv( look.match->value,
                                look.match->subj_len ) == 0 ) {
             if ( status == NATS_EXPIRED ) {
-              this->sub_route.del_pat( npat );
+              if ( look.que_hash == 0 )
+                this->sub_route.del_pat( npat );
+              else
+                this->sub_route.del_pat_queue( npat );
               this->map.unsub_remove( look );
             }
             else {
               npat.sub_count = look.match->refcnt;
-              this->sub_route.notify_unpat( npat );
+              if ( look.que_hash == 0 )
+                this->sub_route.notify_unpat( npat );
+              else
+                this->sub_route.notify_unpat_queue( npat );
             }
           }
           break;

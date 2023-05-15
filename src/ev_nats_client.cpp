@@ -217,7 +217,7 @@ EvNatsClient::make_session( void ) noexcept
   inbox[ inbox_len++ ] = '.';
   uint32_t h = kv_crc_c( inbox, inbox_len,
                          this->sub_route.prefix_seed( inbox_len ) );
-  this->do_psub( h, inbox, inbox_len );
+  this->do_psub( h, inbox, inbox_len, NULL, 0 );
   this->idle_push_write();
 }
 
@@ -365,20 +365,20 @@ EvNatsClient::fwd_pub( NatsMsg &msg ) noexcept
 bool
 EvNatsClient::deduplicate_wildcard( NatsMsg &msg,  EvPublish &pub ) noexcept
 {
-  BitIter64  bi( this->sub_route.pat_mask );
-  uint32_t   hash,
-             max_sid = 0;
+  BitSet64 bi( this->sub_route.pat_mask );
+  uint32_t i, hash,
+           max_sid = 0;
   /* bitmask of prefix lengths, 0 -> 63 chars */
-  if ( bi.first() ) {
+  if ( bi.first( i ) ) {
     /* if didn't hash prefixes */
     do {
-      if ( bi.i > msg.subject_len )
+      if ( i > msg.subject_len )
         break;
-      hash = this->sub_route.prefix_seed( bi.i );
-      if ( bi.i > 0 )
-        hash = kv_crc_c( msg.subject, bi.i, hash );
+      hash = this->sub_route.prefix_seed( i );
+      if ( i > 0 )
+        hash = kv_crc_c( msg.subject, i, hash );
       NatsPrefix *pref = this->pat_tab.find( hash, msg.subject,
-                                             (size_t) bi.i );
+                                             (size_t) i );
       if ( pref != NULL ) {
         if ( msg.sid[ 0 ] != '-' ) /* not a wildcard sid */
           return true; /* matches a wildcard, toss the subject publish */
@@ -386,7 +386,7 @@ EvNatsClient::deduplicate_wildcard( NatsMsg &msg,  EvPublish &pub ) noexcept
           max_sid = pref->sid;
       }
       /* track the prefix hashes, it is used by poll.forward_msg() */
-    } while ( bi.next() );
+    } while ( bi.next( i ) );
   }
   /* if no wildcard matches or the maximum sid matches, forward */
   if ( max_sid == 0 || (uint64_t) max_sid ==
@@ -636,25 +636,25 @@ EvNatsClient::remove_sid( uint32_t h, const char *sub, size_t sublen ) noexcept
 }
 /* forward subscribe subject: SUB subject sid */
 void
-EvNatsClient::do_sub( uint32_t h,  const char *sub,  size_t sublen ) noexcept
+EvNatsClient::do_sub( uint32_t h,  const char *sub,  size_t sublen,
+                      const char *queue,  size_t queue_len ) noexcept
 {
   bool     is_new;
   uint32_t sid        = this->create_sid( h, sub, sublen, is_new ),
            sid_digits = (uint32_t) uint32_digits( sid );
   size_t   len = 4 +             /* SUB */
                  sublen + 1 +    /* <subject> */
+                 queue_len + 1 + /* <queue>   */
                  sid_digits + 2; /* <sid>\r\n */
-  char *p = this->alloc( len ),
-       *s = p;
-  p = concat_hdr( p, "SUB ", 4 );
-  p = concat_hdr( p, sub, sublen );
-  *p++ = ' ';
-  uint32_to_string( sid, p, sid_digits );
-  p = &p[ sid_digits ];
-  *p++ = '\r'; *p++ = '\n';
-  this->sz += len;
+  char *p = this->alloc( len );
+  CatPtr hdr( p );
+  hdr.s( "SUB " ).x( sub, sublen ).s( " " );
+  if ( queue_len > 0 )
+    hdr.x( queue, queue_len ).s( " " );
+  hdr.u( sid, sid_digits ).s( "\r\n" );
+  this->sz += hdr.len();
   if ( nats_client_sub_verbose )
-    printf( "%.*s", (int) len, s );
+    printf( "%.*s", (int) hdr.len(), p );
 }
 
 const char *
@@ -677,7 +677,8 @@ EvNatsClient::is_wildcard( const char *subject,  size_t subject_len ) noexcept
   return NULL;
 }
 void
-EvNatsClient::subscribe( const char *subject,  size_t subject_len ) noexcept
+EvNatsClient::subscribe( const char *subject,  size_t subject_len,
+                         const char *queue,  size_t queue_len ) noexcept
 {
   const char *pre;
   uint32_t h;
@@ -687,11 +688,11 @@ EvNatsClient::subscribe( const char *subject,  size_t subject_len ) noexcept
       prefix_len = MAX_PRE - 1;
     h = kv_crc_c( subject, prefix_len,
                   this->sub_route.prefix_seed( prefix_len ) );
-    this->do_psub( h, subject, prefix_len );
+    this->do_psub( h, subject, prefix_len, queue, queue_len );
   }
   else {
     h = kv_crc_c( subject, subject_len, 0 );
-    this->do_sub( h, subject, subject_len );
+    this->do_sub( h, subject, subject_len, queue, queue_len );
   }
   this->idle_push_write();
 }
@@ -699,7 +700,7 @@ EvNatsClient::subscribe( const char *subject,  size_t subject_len ) noexcept
 void
 EvNatsClient::on_sub( NotifySub &sub ) noexcept
 {
-  this->do_sub( sub.subj_hash, sub.subject, sub.subject_len );
+  this->do_sub( sub.subj_hash, sub.subject, sub.subject_len, NULL, 0 );
   this->idle_push_write();
 }
 void
@@ -741,7 +742,7 @@ EvNatsClient::unsubscribe( const char *subject,  size_t subject_len ) noexcept
       prefix_len = MAX_PRE - 1;
     h = kv_crc_c( subject, prefix_len,
                   this->sub_route.prefix_seed( prefix_len ) );
-    this->do_punsub( h, subject, (uint8_t) prefix_len );
+    this->do_punsub( h, subject, prefix_len );
   }
   else {
     h = kv_crc_c( subject, subject_len, 0 );
@@ -751,7 +752,8 @@ EvNatsClient::unsubscribe( const char *subject,  size_t subject_len ) noexcept
 /* forward pattern subscribe: SUB wildcard -sid */
 void
 EvNatsClient::do_psub( uint32_t h,  const char *prefix,
-                       uint8_t prefix_len ) noexcept
+                       size_t prefix_len,  const char *queue,
+                       size_t queue_len ) noexcept
 {
   uint8_t w = ( prefix_len == 0 ? 0 : prefix[ 0 ] );
   bool         is_new;
@@ -759,11 +761,16 @@ EvNatsClient::do_psub( uint32_t h,  const char *prefix,
                sid_digits = (uint32_t) uint32_digits( sid );
   size_t       len        = 4 +                 /* SUB */
                             prefix_len + 2 +    /* <subject> + > */
+                            queue_len + 1 +     /* <queue> */
                             1 + sid_digits + 2; /* -<sid>\r\n */
   NatsPrefix * pat;
   if ( is_new ) {
     this->set_wildcard_match( w ); /* track first char of wildcards */
-    pat = this->pat_tab.insert( h, prefix, (size_t) prefix_len );
+    pat = this->pat_tab.insert( h, prefix, prefix_len );
+    if ( pat == NULL ) {
+      fprintf( stderr, "pattern insert error: %.*s\n", (int) prefix_len, prefix );
+      return;
+    }
     pat->sid = sid;
   }
   else {
@@ -777,18 +784,15 @@ EvNatsClient::do_psub( uint32_t h,  const char *prefix,
       pat->sid = sid;
     }
   }
-  char *p = this->alloc( len ),
-       *s = p;
-  p = concat_hdr( p, "SUB ", 4 );
-  if ( prefix_len > 0 )
-    p = concat_hdr( p, prefix, prefix_len );
-  *p++ = '>'; *p++ = ' '; *p++ = '-';
-  uint32_to_string( sid, p, sid_digits );
-  p = &p[ sid_digits ];
-  *p++ = '\r'; *p++ = '\n';
-  this->sz += len;
+  char *p = this->alloc( len );
+  CatPtr hdr( p );
+  hdr.s( "SUB " ).x( prefix, prefix_len ).s( "> " );
+  if ( queue_len > 0 )
+    hdr.x( queue, queue_len ).s( " " );
+  hdr.s( "-" ).u( sid, sid_digits ).s( "\r\n" );
+  this->sz += hdr.len();
   if ( nats_client_sub_verbose )
-    printf( "%.*s", (int) len, s );
+    printf( "%.*s", (int) hdr.len(), p );
 }
 /* forward pattern subscribe: SUB wildcard -sid */
 void
@@ -809,7 +813,7 @@ EvNatsClient::on_psub( NotifyPattern &pat ) noexcept
     fwd = true;
   if ( ! fwd )
     return;
-  this->do_psub( pat.prefix_hash, prefix, (uint8_t) prefix_len );
+  this->do_psub( pat.prefix_hash, prefix, prefix_len, NULL, 0 );
   this->idle_push_write();
 }
 /* forward pattern unsubscribe: UNSUB -sid */
@@ -833,12 +837,12 @@ EvNatsClient::on_punsub( NotifyPattern &pat ) noexcept
     fwd = true;
   if ( ! fwd )
     return;
-  this->do_punsub( pat.prefix_hash, prefix, (uint8_t) prefix_len );
+  this->do_punsub( pat.prefix_hash, prefix, prefix_len );
 }
 
 void
 EvNatsClient::do_punsub( uint32_t h,  const char *prefix,
-                         uint8_t prefix_len ) noexcept
+                         size_t prefix_len ) noexcept
 {
   uint32_t sid        = this->remove_sid( h, prefix, prefix_len ),
            sid_digits = (uint32_t) uint32_digits( sid );
@@ -871,10 +875,10 @@ EvNatsClient::on_reassert( uint32_t /*fd*/,  RouteVec<RouteSub> &sub_db,
   RouteSub * sub;
 
   for ( sub = sub_db.first( loc ); sub != NULL; sub = sub_db.next( loc ) ) {
-    this->do_sub( sub->hash, sub->value, sub->len );
+    this->do_sub( sub->hash, sub->value, sub->len, NULL, 0 );
   }
   for ( sub = pat_db.first( loc ); sub != NULL; sub = pat_db.next( loc ) ) {
-    this->do_psub( sub->hash, sub->value, (uint8_t) sub->len );
+    this->do_psub( sub->hash, sub->value, sub->len, NULL, 0 );
   }
   this->idle_push_write();
 }

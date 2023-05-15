@@ -32,6 +32,7 @@ struct NatsLogin {
     ::memset( (void *) this, 0, sizeof( *this ) );
     this->protocol = 1;
     this->verbose = true;
+    this->echo = true;
   }
   void release( void ) {
     for ( char ** i = &this->name; i <= &this->auth_token; i++ ) {
@@ -41,6 +42,7 @@ struct NatsLogin {
     ::memset( (void *) this, 0, sizeof( *this ) );
     this->protocol = 1;
     this->verbose = true;
+    this->echo = true;
   }
   static void save_string( char *&field,  const void *s,  size_t len ) {
     field = (char *) ::realloc( field, len + 1 );
