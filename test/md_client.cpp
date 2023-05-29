@@ -154,7 +154,7 @@ NatsDataCallback::send_dict_request( void ) noexcept
   uint16_t inbox_len = this->client.make_inbox( inbox, DICT_INBOX_ID );
   /* request dictionar */
   EvPublish pub( DICT_SUBJ, DICT_SUBJ_LEN, inbox, inbox_len,
-                 "x", 1, this->client.sub_route, this->client, 0, 0, 0 );
+                 "x", 1, this->client.sub_route, this->client, 0, 0 );
   this->client.publish( pub );
 }
 
@@ -273,7 +273,7 @@ main( int argc, const char *argv[] )
   const char * host    = get_arg( x, argc, argv, 1, "-d", "-host", "tcp:4222" ),
              * name    = get_arg( x, argc, argv, 1, "-n", "-name", "client"),
              * user    = get_arg( x, argc, argv, 1, "-u", "-user", "nobody" ),
-             * pass    = get_arg( x, argc, argv, 1, "-p", "-pass", NULL ),
+             * pass    = get_arg( x, argc, argv, 1, "-z", "-pass", NULL ),
              * token   = get_arg( x, argc, argv, 1, "-t", "-token", NULL ),
              * path    = get_arg( x, argc, argv, 1, "-c", "-cfile", NULL ),
              * nodict  = get_arg( x, argc, argv, 0, "-x", "-nodict", NULL ),
@@ -290,7 +290,7 @@ main( int argc, const char *argv[] )
              "  -d host    = daemon port to connect\n"
              "  -n name    = program name\n"
              "  -u user    = user name\n"
-             "  -p pass    = user pass\n"
+             "  -z pass    = user pass\n"
              "  -t token   = user token\n"
              "  -c cfile   = if loading dictionary from files\n"
              "  -x         = don't load a dictionary\n"

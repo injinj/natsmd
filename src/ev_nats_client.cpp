@@ -311,8 +311,7 @@ EvNatsClient::fwd_pub( NatsMsg &msg ) noexcept
   EvPublish pub( msg.subject, msg.subject_len,
                  msg.reply, msg.reply_len,
                  msg.msg_ptr, msg.msg_len,
-                 this->sub_route, *this, xsub.hash(),
-                 MD_STRING, 'p' );
+                 this->sub_route, *this, xsub.hash(), MD_STRING );
   uint32_t       pmatch;
   bool           flow = true;
   NatsFragment * frag = NULL;
@@ -365,7 +364,7 @@ EvNatsClient::fwd_pub( NatsMsg &msg ) noexcept
 bool
 EvNatsClient::deduplicate_wildcard( NatsMsg &msg,  EvPublish &pub ) noexcept
 {
-  BitSet64 bi( this->sub_route.pat_mask );
+  BitSet64 bi( this->sub_route.pat_mask() );
   uint32_t i, hash,
            max_sid = 0;
   /* bitmask of prefix lengths, 0 -> 63 chars */

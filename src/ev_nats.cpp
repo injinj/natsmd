@@ -710,7 +710,7 @@ EvNatsService::fwd_pub( NatsMsg &msg ) noexcept
 
   uint32_t  h = kv_crc_c( sub, sublen, 0 );
   EvPublish pub( sub, sublen, rep, replen, msg.msg_ptr, msg.msg_len,
-                 this->sub_route, *this, h, MD_STRING, 'p' );
+                 this->sub_route, *this, h, MD_STRING );
   pub.hdr_len = msg.hdr_len;
   BPData * data = NULL;
   if ( ( this->nats_state & ( NATS_BACKPRESSURE | NATS_BUFFERSIZE ) ) != 0 )
