@@ -422,10 +422,17 @@ EvNatsService::is_subscribed( const NotifySub &sub ) noexcept
 {
   uint8_t v    = 0;
   bool    coll = false;
-  if ( this->map.sub_tab.find3( sub.subj_hash, sub.subject, sub.subject_len,
-                                coll ) == NATS_OK )
-    v |= EV_SUBSCRIBED;
-  else
+  if ( ! sub.is_notify_queue() ) {
+    if ( this->map.sub_tab.find3( sub.subj_hash, sub.subject, sub.subject_len,
+                                  coll ) == NATS_OK )
+      v |= EV_SUBSCRIBED;
+  }
+  else {
+    if ( this->map.qsub_tab.find3( sub.subj_hash, sub.subject, sub.subject_len,
+                                   coll ) == NATS_OK )
+      v |= EV_SUBSCRIBED;
+  }
+  if ( v == 0 )
     v |= EV_NOT_SUBSCRIBED;
   if ( coll )
     v |= EV_COLLISION;
@@ -439,8 +446,16 @@ EvNatsService::is_psubscribed( const NotifyPattern &pat ) noexcept
   bool    coll = false;
   const PatternCvt & cvt = pat.cvt;
   NatsPatternRoute * rt;
-  if ( this->map.pat_tab.find3( pat.prefix_hash, pat.pattern, cvt.prefixlen,
-                                rt, coll ) == NATS_OK ) {
+  int status;
+  if ( ! pat.is_notify_queue() ) {
+    status = this->map.pat_tab.find3( pat.prefix_hash, pat.pattern,
+                                      cvt.prefixlen, rt, coll );
+  }
+  else {
+    status = this->map.qpat_tab.find3( pat.prefix_hash, pat.pattern,
+                                       cvt.prefixlen, rt, coll );
+  }
+  if ( status == NATS_OK ) {
     NatsWildMatch *m;
     for ( m = rt->list.hd; m != NULL; m = m->next ) {
       if ( m->len == pat.pattern_len &&
