@@ -215,7 +215,7 @@ NatsDataCallback::on_msg( EvPublish &pub ) noexcept
     if ( which == DICT_INBOX_ID ) {
       printf( "Received dictionary message\n" );
       m = MDMsg::unpack( (void *) pub.msg, 0, pub.msg_len, 0, this->dict,
-                         &mem );
+                         mem );
       this->on_dict( m );
       this->start_subscriptions();
       return true;
@@ -236,7 +236,7 @@ NatsDataCallback::on_msg( EvPublish &pub ) noexcept
     else
       printf( "## %.*s:\n", (int) pub.subject_len, pub.subject );
   }
-  m = MDMsg::unpack( (void *) pub.msg, 0, pub.msg_len, 0, this->dict, &mem );
+  m = MDMsg::unpack( (void *) pub.msg, 0, pub.msg_len, 0, this->dict, mem );
   /* print message */
   if ( m != NULL ) {
     printf( "## format: %s, length %u\n", m->get_proto_string(), pub.msg_len );

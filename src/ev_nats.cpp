@@ -966,7 +966,7 @@ void
 NatsMsgTransform::transform( void ) noexcept
 {
   MDMsg * m = MDMsg::unpack( (void *) this->msg, 0, this->msg_len, 0,
-                             NULL, &this->spc );
+                             NULL, this->spc );
   if ( m == NULL )
     return;
 
@@ -1172,7 +1172,7 @@ EvNatsService::parse_connect( const char *buf,  size_t bufsz ) noexcept
   if ( end <= start )
     goto do_notify;
 
-  msg = JsonMsg::unpack( (void *) start, 0, &end[ 1 ] - start, 0, NULL, &mem );
+  msg = JsonMsg::unpack( (void *) start, 0, &end[ 1 ] - start, 0, NULL, mem );
   if ( msg == NULL )
     goto do_notify;
   if ( msg->get_field_iter( iter ) != 0 )

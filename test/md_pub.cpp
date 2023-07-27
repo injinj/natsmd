@@ -331,7 +331,7 @@ NatsDataCallback::on_msg( EvPublish &pub ) noexcept
 {
   MDMsgMem mem;
   MDMsg  * m = MDMsg::unpack( (void *) pub.msg, 0, pub.msg_len, 0, this->dict,
-                              &mem );
+                              mem );
   /* check if published to _INBOX.<session>. */
   uint64_t which = this->client.is_inbox( pub.subject, pub.subject_len );
   if ( which != 0 ) {

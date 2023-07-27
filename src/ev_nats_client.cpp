@@ -906,7 +906,7 @@ EvNatsClient::parse_info( const char *buf,  size_t bufsz ) noexcept
       MDName        name;
       MDReference   mref;
       msg = JsonMsg::unpack( (void *) start, 0, &end[ 1 ] - start, 0, NULL,
-                             &mem );
+                             mem );
       if ( msg != NULL ) {
         if ( msg->get_field_iter( iter ) == 0 ) {
           if ( iter->first() == 0 ) {
