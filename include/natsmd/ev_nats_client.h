@@ -116,7 +116,7 @@ struct EvNatsClientParameters {
 
 struct NatsClientCB {
   NatsClientCB() {}
-  virtual bool on_msg( kv::EvPublish &pub ) noexcept;
+  virtual bool on_nats_msg( kv::EvPublish &pub ) noexcept;
 };
 
 static const size_t MAX_NATS_INBOX_LEN = 88; /* _INBOX.<session>.<number> */

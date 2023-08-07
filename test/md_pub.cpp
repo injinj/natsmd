@@ -83,7 +83,7 @@ struct NatsDataCallback : public EvConnectionNotify, public NatsClientCB,
   /* dict timeout */
   virtual bool timer_cb( uint64_t timer_id,  uint64_t event_id ) noexcept;
   /* message from network */
-  virtual bool on_msg( EvPublish &pub ) noexcept;
+  virtual bool on_nats_msg( EvPublish &pub ) noexcept;
   /* flush send, ready to send more */
   virtual void on_write_ready( void ) noexcept;
 };
@@ -327,7 +327,7 @@ NatsDataCallback::on_shutdown( EvSocket &conn,  const char *err,
 }
 
 bool
-NatsDataCallback::on_msg( EvPublish &pub ) noexcept
+NatsDataCallback::on_nats_msg( EvPublish &pub ) noexcept
 {
   MDMsgMem mem;
   MDMsg  * m = MDMsg::unpack( (void *) pub.msg, 0, pub.msg_len, 0, this->dict,

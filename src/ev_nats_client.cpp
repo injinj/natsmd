@@ -57,7 +57,7 @@ EvNatsClient::EvNatsClient( EvPoll &p ) noexcept
   }
 }
 
-bool NatsClientCB::on_msg( EvPublish & ) noexcept { return true; }
+bool NatsClientCB::on_nats_msg( EvPublish & ) noexcept { return true; }
 
 EvNatsClient *
 EvNatsClient::create_nats_client( EvPoll &p ) noexcept
@@ -346,7 +346,7 @@ EvNatsClient::fwd_pub( NatsMsg &msg ) noexcept
   /* if only one possible match, no need to deduplicate */
   if ( pmatch <= 1 ) {
     if ( this->cb != NULL )
-      flow = this->cb->on_msg( pub );
+      flow = this->cb->on_nats_msg( pub );
     else
       flow = this->sub_route.forward_msg( pub );
   }
@@ -391,7 +391,7 @@ EvNatsClient::deduplicate_wildcard( NatsMsg &msg,  EvPublish &pub ) noexcept
   if ( max_sid == 0 || (uint64_t) max_sid ==
                        string_to_uint64( &msg.sid[ 1 ], msg.sid_len - 1 ) ) {
     if ( this->cb != NULL )
-      return this->cb->on_msg( pub );
+      return this->cb->on_nats_msg( pub );
     return this->sub_route.forward_msg( pub );
   }
   /* toss the publish, only forward the maximum sid */
@@ -984,7 +984,7 @@ EvNatsClient::parse_info( const char *buf,  size_t bufsz ) noexcept
     printf( "%.*s", len, outbuf );
   this->append( outbuf, len );
   /* if all subs are forwarded to NATS */
-  if ( this->fwd_all_subs )
+  if ( this->fwd_all_subs && this->cb == NULL )
     this->sub_route.add_route_notify( *this );
   /* if all msgs are forwarded to NATS */
   if ( this->fwd_all_msgs ) {
@@ -1003,7 +1003,7 @@ EvNatsClient::release( void ) noexcept
     uint32_t h = this->sub_route.prefix_seed( 0 );
     this->sub_route.del_pattern_route( h, this->fd, 0 );
   }
-  if ( this->fwd_all_subs )
+  if ( this->fwd_all_subs && this->cb == NULL )
     this->sub_route.remove_route_notify( *this );
   this->release_fragments();
   if ( this->sid_ht != NULL ) {
