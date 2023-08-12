@@ -195,10 +195,11 @@ write_msg( Writer &writer,  const char *sub,  size_t sublen,
 void
 NatsDataCallback::run_publishers( void ) noexcept
 {
-  size_t   msg_len;
-  uint32_t msg_enc = 0;
-  char   * s;
-  size_t   slen;
+  uint8_t * buf_ptr;
+  size_t    msg_len;
+  uint32_t  msg_enc = 0;
+  char    * s;
+  size_t    slen;
 
   if ( this->poll.quit != 0 )
     return;
@@ -206,33 +207,38 @@ NatsDataCallback::run_publishers( void ) noexcept
     s    = this->sub_buf;
     slen = ::snprintf( s, this->max_len, this->sub[ this->i ], (int) this->j );
 
+    MDMsgMem mem;
     if ( this->use_json ) {
-      JsonMsgWriter jsonmsg( this->msg_buf, this->msg_buf_len );
+      JsonMsgWriter jsonmsg( mem, this->msg_buf, this->msg_buf_len );
       msg_len = write_msg<JsonMsgWriter>( jsonmsg, s, slen, this->k,
                                           this->payload, this->payload_bytes );
+      buf_ptr = jsonmsg.buf;
       msg_enc = JSON_TYPE_ID;
     }
     else if ( this->use_rv ) {
-      RvMsgWriter rvmsg( this->msg_buf, this->msg_buf_len );
+      RvMsgWriter rvmsg( mem, this->msg_buf, this->msg_buf_len );
       msg_len = write_msg<RvMsgWriter>( rvmsg, s, slen, this->k,
                                         this->payload, this->payload_bytes );
+      buf_ptr = rvmsg.buf;
       msg_enc = RVMSG_TYPE_ID;
     }
     else if ( this->use_tibmsg || ! this->have_dictionary ) {
-      TibMsgWriter tibmsg( this->msg_buf, this->msg_buf_len );
+      TibMsgWriter tibmsg( mem, this->msg_buf, this->msg_buf_len );
       msg_len = write_msg<TibMsgWriter>( tibmsg, s, slen, this->k,
                                          this->payload, this->payload_bytes );
+      buf_ptr = tibmsg.buf;
       msg_enc = TIBMSG_TYPE_ID;
     }
     else {
-      TibSassMsgWriter tibmsg( this->dict, this->msg_buf, this->msg_buf_len );
+      TibSassMsgWriter tibmsg( mem, this->dict, this->msg_buf, this->msg_buf_len );
       msg_len = write_msg<TibSassMsgWriter>( tibmsg, s, slen, this->k,
                                           this->payload, this->payload_bytes );
+      buf_ptr = tibmsg.buf;
       msg_enc = TIB_SASS_TYPE_ID;
     }
     if ( this->dump_hex ) {
       MDOutput mout;
-      mout.print_hex( this->msg_buf, msg_len );
+      mout.print_hex( buf_ptr, msg_len );
     }
     if ( ++this->i == this->sub_n ) {
       this->i = 0;
@@ -241,7 +247,7 @@ NatsDataCallback::run_publishers( void ) noexcept
         this->k++;
       }
     }
-    EvPublish pub( s, slen, NULL, 0, this->msg_buf, msg_len,
+    EvPublish pub( s, slen, NULL, 0, buf_ptr, msg_len,
                    this->client.sub_route, this->client, 0, msg_enc );
     if ( ! this->client.publish( pub ) ) {
       /* wait for ready */
