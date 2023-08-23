@@ -22,14 +22,14 @@ struct Args : public MainLoopVars { /* argv[] parsed args */
 };
 
 struct Loop : public MainLoop<Args> {
-  Loop( EvShm &m,  Args &args,  size_t num,  bool (*ini)( void * ) ) :
-    MainLoop<Args>( m, args, num, ini ) {}
+  Loop( EvShm &m,  Args &args,  size_t num ) :
+    MainLoop<Args>( m, args, num ) {}
 
   EvNatsListen * nats_sv;
   bool nats_init( void ) {
     return Listen<EvNatsListen>( 0, this->r.nats_port, this->nats_sv,
                                  this->r.tcp_opts ); }
-  bool init( void ) {
+  virtual bool initialize( void ) noexcept {
     if ( this->thr_num == 0 )
       printf( "nats:                 %d\n", this->r.nats_port );
     int cnt = this->nats_init();
@@ -37,8 +37,8 @@ struct Loop : public MainLoop<Args> {
       fflush( stdout );
     return cnt > 0;
   }
-  static bool initialize( void *me ) noexcept {
-    return ((Loop *) me)->init();
+  virtual bool finish( void ) noexcept {
+    return true;
   }
 };
 
@@ -61,7 +61,7 @@ main( int argc, const char *argv[] )
   printf( "nats_version:         " kv_stringify( NATSMD_VER ) "\n" );
   shm.print();
   r.nats_port = r.parse_port( argc, argv, "-c", "42222" );
-  Runner<Args, Loop> runner( r, shm, Loop::initialize );
+  Runner<Args, Loop> runner( r, shm );
   if ( r.thr_error == 0 )
     return 0;
   return 1;
