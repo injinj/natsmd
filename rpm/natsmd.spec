@@ -18,12 +18,14 @@ BuildRequires:  pcre2-devel
 BuildRequires:  hdrhist
 BuildRequires:  git-core
 BuildRequires:  c-ares-devel
+BuildRequires:  zlib-devel
 Requires:       raikv
 Requires:       raimd
 Requires:       libdecnumber
 Requires:       pcre2
 Requires:       hdrhist
 Requires:       c-ares
+Requires:       zlib
 Requires(post): /sbin/ldconfig
 Requires(postun): /sbin/ldconfig
 
