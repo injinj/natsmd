@@ -8,6 +8,9 @@
 
 extern "C" {
 const char *natsmd_get_version( void );
+rai::kv::EvTcpListen *nats_create_listener( rai::kv::EvPoll *p,
+                                            rai::kv::RoutePublish *sr,
+                                      rai::kv::EvConnectionNotify *n ) noexcept;
 }
 namespace rai {
 namespace natsmd {
@@ -54,12 +57,19 @@ struct NatsLogin {
 struct EvNatsListen : public kv::EvTcpListen {
   void * operator new( size_t, void *ptr ) { return ptr; }
   kv::RoutePublish & sub_route;
+  void             * host;
+  char               prefix[ MAX_PREFIX_LEN ];
+  size_t             prefix_len;
+  uint16_t           svc;
 
   EvNatsListen( kv::EvPoll &p,  kv::RoutePublish &sr ) noexcept;
   EvNatsListen( kv::EvPoll &p ) noexcept;
 
   virtual kv::EvSocket *accept( void ) noexcept;
   virtual int listen( const char *ip,  int port,  int opts ) noexcept;
+  virtual void set_service( void *host,  uint16_t svc ) noexcept;
+  virtual bool get_service( void *host,  uint16_t &svc ) const noexcept;
+  virtual void set_prefix( const char *pref,  size_t preflen ) noexcept;
 };
 
 struct EvPrefetchQueue;
@@ -155,12 +165,13 @@ struct EvNatsService : public kv::EvConnection, public kv::BPData {
              prefix_len,
              session_len;
   NatsLogin  user;
-  char       prefix[ 16 ],
+  char       prefix[ MAX_PREFIX_LEN ],
              session[ MAX_SESSION_LEN ];
   uint64_t   timer_id;
 
-  EvNatsService( kv::EvPoll &p,  const uint8_t t,  EvNatsListen &l )
-    : kv::EvConnection( p, t ), sub_route( l.sub_route ), listen( l ) {}
+  EvNatsService( kv::EvPoll &p,  const uint8_t t,  EvNatsListen &l,
+                 kv::EvConnectionNotify *n )
+    : kv::EvConnection( p, t, n ), sub_route( l.sub_route ), listen( l ) {}
 
   void initialize_state( const char *pre,  size_t prelen,  uint64_t id ) {
     this->nats_state  = 0;
@@ -190,6 +201,8 @@ struct EvNatsService : public kv::EvConnection, public kv::BPData {
   virtual uint8_t is_subscribed( const kv::NotifySub &sub ) noexcept;
   virtual uint8_t is_psubscribed( const kv::NotifyPattern &pat ) noexcept;
 
+  virtual void set_prefix( const char *pref,  size_t preflen ) noexcept;
+  virtual void set_service( void *host,  uint16_t svc ) noexcept;
   virtual bool get_service( void *host,  uint16_t &svc ) const noexcept;
   virtual bool set_session( const char session[ MAX_SESSION_LEN ] ) noexcept;
   virtual size_t get_userid( char userid[ MAX_USERID_LEN ] ) const noexcept;

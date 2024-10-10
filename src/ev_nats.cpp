@@ -21,13 +21,6 @@
 #include <raikv/pattern_cvt.h>
 #include <raimd/json_msg.h>
 
-extern "C" {
-const char *
-natsmd_get_version( void )
-{
-  return kv_stringify( NATSMD_VER );
-}
-}
 uint32_t rai::natsmd::nats_debug = 0;
 
 using namespace rai;
@@ -35,11 +28,33 @@ using namespace natsmd;
 using namespace kv;
 using namespace md;
 
+extern "C" {
+
+const char *
+natsmd_get_version( void )
+{
+  return kv_stringify( NATSMD_VER );
+}
+
+EvTcpListen *
+nats_create_listener( rai::kv::EvPoll *p,  rai::kv::RoutePublish *sr,  
+                      rai::kv::EvConnectionNotify *n ) noexcept
+{
+  EvNatsListen *l = new ( aligned_malloc( sizeof( EvNatsListen ) ) )
+    EvNatsListen( *p, *sr );
+  l->notify = n;
+  return l;
+}
+
+}
+
 EvNatsListen::EvNatsListen( EvPoll &p ) noexcept
-  : EvTcpListen( p, "nats_listen", "nats_sock" ), sub_route( p.sub_route ) {}
+  : EvTcpListen( p, "nats_listen", "nats_sock" ), sub_route( p.sub_route ),
+    host( 0 ), prefix_len( 0 ), svc( 0 ) {}
 
 EvNatsListen::EvNatsListen( EvPoll &p,  RoutePublish &sr ) noexcept
-  : EvTcpListen( p, "nats_listen", "nats_sock" ), sub_route( sr ) {}
+  : EvTcpListen( p, "nats_listen", "nats_sock" ), sub_route( sr ),
+    host( 0 ), prefix_len( 0 ), svc( 0 ) {}
 
 int
 EvNatsListen::listen( const char *ip,  int port,  int opts ) noexcept
@@ -48,6 +63,27 @@ EvNatsListen::listen( const char *ip,  int port,  int opts ) noexcept
                                          this->sub_route.route_id );
 }
 
+void
+EvNatsListen::set_service( void *host,  uint16_t svc ) noexcept
+{
+  this->host = host;
+  this->svc  = svc;
+}
+
+bool
+EvNatsListen::get_service( void *host,  uint16_t &svc ) const noexcept
+{
+  svc = this->svc;
+  if ( host != NULL )
+    *(void **) host = (void *) &this->host;
+  return this->svc != 0;
+}
+
+void
+EvNatsListen::set_prefix( const char *pref,  size_t preflen ) noexcept
+{
+  this->prefix_len = cpyb<MAX_PREFIX_LEN>( this->prefix, pref, preflen );
+}
 /*
  * NATS protocol:
  *
@@ -139,8 +175,9 @@ EvSocket *
 EvNatsListen::accept( void ) noexcept
 {
   EvNatsService *c =
-    this->poll.get_free_list<EvNatsService, EvNatsListen &>(
-      this->accept_sock_type, *this );
+    this->poll.get_free_list<EvNatsService, EvNatsListen &,
+                             EvConnectionNotify *>(
+      this->accept_sock_type, *this, this->notify );
 
   if ( c == NULL )
     return NULL;
@@ -172,6 +209,7 @@ EvNatsListen::accept( void ) noexcept
     init_server_info( h1, h2, port );
   }
   c->initialize_state( NULL, 0, ++this->timer_id );
+  c->set_prefix( this->prefix, this->prefix_len );
   c->append_iov( nats_server_info, sizeof( nats_server_info ) - 1 );
   c->idle_push( EV_WRITE_HI );
   return c;
@@ -1031,6 +1069,18 @@ EvNatsService::read( void ) noexcept
   this->pop3( EV_READ, EV_READ_HI, EV_READ_LO );
 }
 
+void
+EvNatsService::set_prefix( const char *pref,  size_t preflen ) noexcept
+{
+  this->prefix_len = cpyb<MAX_PREFIX_LEN>( this->prefix, pref, preflen );
+}
+
+void
+EvNatsService::set_service( void *host,  uint16_t svc ) noexcept
+{
+  this->listen.set_service( host, svc );
+}
+
 bool
 EvNatsService::get_service( void *host,  uint16_t &svc ) const noexcept
 {
@@ -1040,13 +1090,13 @@ EvNatsService::get_service( void *host,  uint16_t &svc ) const noexcept
 size_t
 EvNatsService::get_userid( char userid[ MAX_USERID_LEN ] ) const noexcept
 {
+  size_t len = 0;
   if ( this->user.user != NULL ) {
-    size_t len = min_int( MAX_USERID_LEN - 1, ::strlen( this->user.user ) );
+    len = min_int( MAX_USERID_LEN - 1, ::strlen( this->user.user ) );
     ::memcpy( userid, this->user.user, len );
-    return len;
   }
-  userid[ 0 ] = '\0';
-  return 0;
+  userid[ len ] = '\0';
+  return len;
 }
 
 bool

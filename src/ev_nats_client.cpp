@@ -25,6 +25,15 @@ int nats_client_pub_verbose,
     nats_client_cmd_verbose,
     nats_client_init;
 
+extern "C" {
+EvConnection *
+nats_create_connection( EvPoll *p,  RoutePublish *sr,  EvConnectionNotify *n )
+{
+  return new ( aligned_malloc( sizeof( EvNatsClient ) ) )
+    EvNatsClient( *p, *sr, n );
+}
+}
+
 static int
 getenv_bool( const char *var )
 {
@@ -32,100 +41,193 @@ getenv_bool( const char *var )
   return val != NULL && val[ 0 ] != 'f' && val[ 0 ] != '0';
 }
 
+static void
+nats_client_static_init( void ) noexcept
+{
+  nats_client_init = 1;
+  nats_client_pub_verbose   = getenv_bool( "NATS_CLIENT_PUB_VERBOSE" );
+  nats_client_msg_verbose   = getenv_bool( "NATS_CLIENT_MSG_VERBOSE" );
+  nats_client_sub_verbose   = getenv_bool( "NATS_CLIENT_SUB_VERBOSE" );
+  nats_client_info_verbose  = getenv_bool( "NATS_CLIENT_INFO_VERBOSE" );
+  nats_client_cmd_verbose   = getenv_bool( "NATS_CLIENT_CMD_VERBOSE" );
+  int all_verbose           = getenv_bool( "NATS_CLIENT_VERBOSE" );
+  nats_client_pub_verbose  |= all_verbose;
+  nats_client_msg_verbose  |= all_verbose;
+  nats_client_sub_verbose  |= all_verbose;
+  nats_client_info_verbose |= all_verbose;
+  nats_client_cmd_verbose  |= all_verbose;
+}
+
+EvNatsClient::EvNatsClient( EvPoll &p,  RoutePublish &sr,
+                            EvConnectionNotify *n ) noexcept
+    : EvConnection( p, p.register_type( "natsclient" ), n ),
+      RouteNotify( sr ), sub_route( sr ), cb( 0 ),
+      next_sid( 1 ), protocol( 1 ), fwd_all_msgs( 0 ), fwd_all_subs( 1 ),
+      max_payload( 1024 * 1024 ), sid_ht( 0 ),
+      prefix_len( 0 ), session_len( 0 ),
+      name( 0 ), lang( 0 ), version( 0 ), user( 0 ), pass( 0 ), auth_token( 0 ),
+      param_buf( 0 )
+{
+  if ( ! nats_client_init )
+    nats_client_static_init();
+}
+
 EvNatsClient::EvNatsClient( EvPoll &p ) noexcept
     : EvConnection( p, p.register_type( "natsclient" ) ),
       RouteNotify( p.sub_route ),
       sub_route( p.sub_route ), cb( 0 ),
-      next_sid( 1 ), protocol( 1 ), fwd_all_msgs( 1 ), fwd_all_subs( 1 ),
-      max_payload( 1024 * 1024 ), name( 0 ),
-      lang( 0 ), version( 0 ), user( 0 ), pass( 0 ), auth_token( 0 ),
-      sid_ht( 0 )
+      next_sid( 1 ), protocol( 1 ), fwd_all_msgs( 0 ), fwd_all_subs( 1 ),
+      max_payload( 1024 * 1024 ), sid_ht( 0 ),
+      prefix_len( 0 ), session_len( 0 ),
+      name( 0 ), lang( 0 ), version( 0 ), user( 0 ), pass( 0 ), auth_token( 0 ),
+      param_buf( 0 )
 {
-  if ( ! nats_client_init ) {
-    nats_client_init = 1;
-    nats_client_pub_verbose   = getenv_bool( "NATS_CLIENT_PUB_VERBOSE" );
-    nats_client_msg_verbose   = getenv_bool( "NATS_CLIENT_MSG_VERBOSE" );
-    nats_client_sub_verbose   = getenv_bool( "NATS_CLIENT_SUB_VERBOSE" );
-    nats_client_info_verbose  = getenv_bool( "NATS_CLIENT_INFO_VERBOSE" );
-    nats_client_cmd_verbose   = getenv_bool( "NATS_CLIENT_CMD_VERBOSE" );
-    int all_verbose           = getenv_bool( "NATS_CLIENT_VERBOSE" );
-    nats_client_pub_verbose  |= all_verbose;
-    nats_client_msg_verbose  |= all_verbose;
-    nats_client_sub_verbose  |= all_verbose;
-    nats_client_info_verbose |= all_verbose;
-    nats_client_cmd_verbose  |= all_verbose;
-  }
+  if ( ! nats_client_init )
+    nats_client_static_init();
 }
 
 bool NatsClientCB::on_nats_msg( EvPublish & ) noexcept { return true; }
 
-EvNatsClient *
-EvNatsClient::create_nats_client( EvPoll &p ) noexcept
+int
+EvNatsClient::connect( kv::EvConnectParam &param ) noexcept
 {
-  void * m = aligned_malloc( sizeof( EvNatsClient ) );
-  if ( m == NULL ) {
-    perror( "alloc nats" );
-    return NULL;
+  EvNatsClientParameters parm2;
+  parm2.ai     = param.ai;
+  parm2.k      = param.k;
+  parm2.opts   = param.opts;
+  parm2.rte_id = param.rte_id;
+
+  for ( int i = 0; i + 1 < param.argc; i += 2 ) {
+    if ( ::strcmp( param.argv[ i ], "daemon" ) == 0 )
+      parm2.host = param.argv[ i + 1 ];
+    else if ( ::strcmp( param.argv[ i ], "connect" ) == 0 )
+      parm2.host = param.argv[ i + 1 ];
+    else if ( ::strcmp( param.argv[ i ], "host" ) == 0 )
+      parm2.host = param.argv[ i + 1 ];
+    else if ( ::strcmp( param.argv[ i ], "lang" ) == 0 )
+      parm2.lang = param.argv[ i + 1 ];
+    else if ( ::strcmp( param.argv[ i ], "version" ) == 0 )
+      parm2.version = param.argv[ i + 1 ];
+    else if ( ::strcmp( param.argv[ i ], "user" ) == 0 )
+      parm2.user = param.argv[ i + 1 ];
+    else if ( ::strcmp( param.argv[ i ], "name" ) == 0 )
+      parm2.name = param.argv[ i + 1 ];
+    else if ( ::strcmp( param.argv[ i ], "pass" ) == 0 )
+      parm2.pass = param.argv[ i + 1 ];
+    else if ( ::strcmp( param.argv[ i ], "auth_token" ) == 0 )
+      parm2.auth_token = param.argv[ i + 1 ];
   }
-  return new ( m ) EvNatsClient( p );
+  if ( this->nats_connect( parm2, param.n, NULL ) ) {
+    for ( int i = 0; i + 1 < param.argc; i += 2 ) {
+      if ( ::strcmp( param.argv[ i ], "broadcast_feed" ) == 0 )
+        this->bcast_subs.add( param.argv[ i + 1 ] );
+      else if ( ::strcmp( param.argv[ i ], "interactive_feed" ) == 0 )
+        this->inter_subs.add( param.argv[ i + 1 ] );
+      else if ( ::strcmp( param.argv[ i ], "subscriber_listen" ) == 0 )
+        this->listen_subs.add( param.argv[ i + 1 ] );
+    }
+    return 0;
+  }
+  return -1;
 }
 
 bool
-EvNatsClient::connect( EvNatsClientParameters &p,
-                       EvConnectionNotify *n,
-                       NatsClientCB *c ) noexcept
+EvNatsClient::nats_connect( EvNatsClientParameters &p,
+                            EvConnectionNotify *n,
+                            NatsClientCB *c ) noexcept
 {
   char * daemon = NULL, buf[ 256 ];
   int port = p.port;
   if ( this->fd != -1 )
     return false;
 
-  if ( p.host != NULL ) {
-    size_t len = ::strlen( p.host );
-    if ( len >= sizeof( buf ) )
-      len = sizeof( buf ) - 1;
-    ::memcpy( buf, p.host, len );
-    buf[ len ] = '\0';
-    daemon = buf;
-  }
-  if ( daemon != NULL ) {
-    char * pt;
-    if ( (pt = ::strrchr( daemon, ':' )) != NULL ) {
-      port = atoi( pt + 1 );
-      *pt = '\0';
+  if ( p.ai == NULL ) {
+    if ( p.host != NULL ) {
+      size_t len = ::strlen( p.host );
+      if ( len >= sizeof( buf ) )
+        len = sizeof( buf ) - 1;
+      ::memcpy( buf, p.host, len );
+      buf[ len ] = '\0';
+      daemon = buf;
     }
-    else {
-      for ( pt = daemon; *pt != '\0'; pt++ )
-        if ( *pt < '0' || *pt > '9' )
-          break;
-      if ( *pt == '\0' ) {
-        port = atoi( daemon );
-        daemon = NULL;
+    if ( daemon != NULL ) {
+      char * pt;
+      if ( (pt = ::strrchr( daemon, ':' )) != NULL ) {
+        port = atoi( pt + 1 );
+        *pt = '\0';
       }
-    }
-    if ( daemon != NULL ) { /* strip tcp: prefix */
-      if ( ::strncmp( daemon, "tcp:", 4 ) == 0 )
-        daemon += 4;
-      if ( ::strcmp( daemon, "tcp" ) == 0 )
-        daemon += 3;
-      if ( daemon[ 0 ] == '\0' )
-        daemon = NULL;
+      else {
+        for ( pt = daemon; *pt != '\0'; pt++ )
+          if ( *pt < '0' || *pt > '9' )
+            break;
+        if ( *pt == '\0' ) {
+          port = atoi( daemon );
+          daemon = NULL;
+        }
+      }
+      if ( daemon != NULL ) { /* strip tcp: prefix */
+        if ( ::strncmp( daemon, "tcp:", 4 ) == 0 )
+          daemon += 4;
+        if ( ::strcmp( daemon, "tcp" ) == 0 )
+          daemon += 3;
+        if ( daemon[ 0 ] == '\0' )
+          daemon = NULL;
+      }
     }
   }
 
   this->initialize_state();
-  if ( EvTcpConnection::connect( *this, daemon, port,
-                                 DEFAULT_TCP_CONNECT_OPTS ) != 0 )
-    return false;
-  this->name       = p.name;
-  this->lang       = p.lang;
-  this->version    = p.version;
-  this->user       = p.user;
-  this->pass       = p.pass;
-  this->auth_token = p.auth_token;
+  if ( p.ai == NULL ) {
+    if ( EvTcpConnection::connect( *this, daemon, port, p.opts ) != 0 )
+      return false;
+  }
+  else {
+    EvConnectParam param( p.ai, p.opts, p.k, p.rte_id );
+    if ( EvTcpConnection::connect3( *this, param ) != 0 )
+      return false;
+  }
+  this->param_buf = ::malloc( CatPtr::a( p.name, p.lang, p.version ) +
+                              CatPtr::a( p.user, p.pass, p.auth_token ) + 1 );
+  CatPtr cat( this->param_buf );
+  this->name       = cat.cstr( p.name );
+  this->lang       = cat.cstr( p.lang );
+  this->version    = cat.cstr( p.version );
+  this->user       = cat.cstr( p.user );
+  this->pass       = cat.cstr( p.pass );
+  this->auth_token = cat.cstr( p.auth_token );
   this->notify     = n;
   this->cb         = c;
   return true;
+}
+
+void
+EvNatsClient::initialize_state( void ) noexcept
+{
+  this->err         = NULL;
+  this->err_len     = 0;
+  this->next_sid    = 1;
+  this->protocol    = 1;
+  /*this->session_len = 0;  may occure before connect
+  this->prefix_len  = 0;*/
+  this->max_payload = 1024 * 1024;
+  this->name        = NULL;
+  this->lang        = NULL;
+  this->version     = NULL;
+  this->user        = NULL;
+  this->pass        = NULL;
+  this->auth_token  = NULL;
+  if ( this->param_buf != NULL )
+    ::free( this->param_buf );
+  this->inter_subs.release();
+  this->bcast_subs.release();
+  this->listen_subs.release();
+  this->param_buf   = NULL;
+  if ( this->sid_ht == NULL )
+    this->sid_ht = SidHashTab::resize( NULL );
+  for ( int i = 0; i < 3; i++ )
+    this->wild_prefix_char[ i ] = 0;
+  for ( int j = 0; j < 96; j++ )
+    this->wild_prefix_char_cnt[ j ] = 0;
 }
 
 void
@@ -252,6 +354,12 @@ EvNatsClient::is_inbox( const char *sub,  size_t sublen ) noexcept
 }
 
 void
+EvNatsClient::set_prefix( const char *pref,  size_t preflen ) noexcept
+{
+  this->prefix_len = cpyb<MAX_PREFIX_LEN>( this->prefix, pref, preflen );
+}
+
+void
 EvNatsClient::save_error( const char *,  size_t ) noexcept
 {
 #if 0
@@ -306,10 +414,27 @@ decode_sub( char *p,  size_t sz )
 bool
 EvNatsClient::fwd_pub( NatsMsg &msg ) noexcept
 {
-  decode_sub( msg.subject, msg.subject_len );
-  NatsStr   xsub( msg.subject, msg.subject_len );
-  EvPublish pub( msg.subject, msg.subject_len,
-                 msg.reply, msg.reply_len,
+  size_t   preflen = this->prefix_len;
+  char       * sub = msg.subject,
+             * rep = msg.reply;
+  size_t    sublen = msg.subject_len,
+            replen = msg.reply_len;
+  if ( preflen > 0 ) {
+    CatPtr tmp( this->alloc_temp( sublen + preflen + 1 ) );
+    tmp.x( this->prefix, preflen ).x( sub, sublen ).end();
+    sub     = tmp.start;
+    sublen += preflen;
+    if ( replen > 0 ) {
+      CatPtr tmp( this->alloc_temp( replen + preflen + 1 ) );
+      tmp.x( this->prefix, preflen ).x( rep, replen ).end();
+      rep     = tmp.start;
+      replen += preflen;
+    } 
+  }     
+
+  decode_sub( sub, sublen );
+  NatsStr   xsub( sub, sublen );
+  EvPublish pub( sub, sublen, rep, replen,
                  msg.msg_ptr, msg.msg_len,
                  this->sub_route, *this, xsub.hash(), MD_STRING );
   uint32_t       pmatch;
@@ -332,14 +457,14 @@ EvNatsClient::fwd_pub( NatsMsg &msg ) noexcept
       }
     }
   }
-  if ( nats_client_pub_verbose )
+  if ( nats_client_pub_verbose || nats_debug )
     printf( "fwd_pub(%.*s) reply(%.*s)\n",
             (int) pub.subject_len, pub.subject,
             (int) pub.reply_len, (char *) pub.reply );
   /* negative sids are wildcard matches */
   if ( msg.sid[ 0 ] == '-' ) /* wild matches, check if another wild match */
-    pmatch = this->possible_matches( msg.subject[ 0 ] );
-  else if ( this->test_wildcard_match( msg.subject[ 0 ] ) )
+    pmatch = this->possible_matches( sub[ 0 ] );
+  else if ( this->test_wildcard_match( sub[ 0 ] ) )
     pmatch = 2; /* normal subject and wildcard */
   else
     pmatch = 1; /* only the subject matches */
@@ -512,25 +637,49 @@ EvNatsClient::on_msg( EvPublish &pub ) noexcept
 bool
 EvNatsClient::publish( EvPublish &pub ) noexcept
 {
+  const char * sub    = pub.subject,
+             * reply  = (const char *) pub.reply;
+  size_t       sublen = pub.subject_len,
+               replen = pub.reply_len,
+               prelen = this->prefix_len;
+
+  if ( sublen < prelen ) {
+    fprintf( stderr, "sub %.*s is less than prefix (%u)\n", (int) sublen, sub,
+             (int) prelen );
+    return true;
+  }
+
+  sub = &sub[ prelen ];
+  sublen -= prelen;
+  if ( replen > prelen ) {
+    reply   = &reply[ prelen ];
+    replen -= prelen;
+  }
+  return this->publish2( pub, sub, sublen, reply, replen );
+}
+
+bool
+EvNatsClient::publish2( EvPublish &pub,  const char *sub,  size_t sublen,
+                        const char *reply,  size_t replen ) noexcept
+{
   char * p;
   size_t len, msg_len_digits;
 
-  if ( nats_client_msg_verbose )
+  if ( nats_client_msg_verbose || nats_debug )
     printf( "on_msg(%.*s) reply(%.*s)\n",
-            (int) pub.subject_len, pub.subject,
-            (int) pub.reply_len, (char *) pub.reply );
+            (int) sublen, sub, (int) replen, reply );
   /* construct PUB subject <reply> <length \r\n <blob> */
   if ( pub.msg_len <= this->max_payload ) {
     msg_len_digits = uint64_digits( pub.msg_len );
-    len = 4 + pub.subject_len + 1 +                /* PUB <subject> */
-      ( pub.reply_len > 0 ? pub.reply_len + 1 : 0 ) + /* [reply] */
-                 msg_len_digits + 2 +             /* <size> \r\n */
-                 pub.msg_len + 2;                     /* <blob> \r\n */
+    len = 4 + sublen + 1 +              /* PUB <subject> */
+      ( replen > 0 ? replen + 1 : 0 ) + /* [reply] */
+                 msg_len_digits + 2 +   /* <size> \r\n */
+                 pub.msg_len + 2;       /* <blob> \r\n */
     p = concat_hdr( this->alloc( len ), "PUB ", 4 );
-    p = encode_sub( p, pub.subject, pub.subject_len );
+    p = encode_sub( p, sub, sublen );
     *p++ = ' ';
-    if ( pub.reply_len > 0 ) {
-      p = concat_hdr( p, (const char *) pub.reply, pub.reply_len );
+    if ( replen > 0 ) {
+      p = concat_hdr( p, reply, replen );
       *p++ = ' ';
     }
     uint64_to_string( pub.msg_len, p, msg_len_digits );
@@ -547,7 +696,7 @@ EvNatsClient::publish( EvPublish &pub ) noexcept
   else {
     NatsTrailer trail( this->poll.create_ns(),
                        this->poll.current_coarse_ns(),
-                       pub.subj_hash,
+                       kv_crc_c( sub, sublen, 0 ),
                        pub.msg_len );
     size_t      frag_size = this->max_payload - sizeof( NatsTrailer ),
                 msg_len   = this->max_payload;
@@ -562,21 +711,21 @@ EvNatsClient::publish( EvPublish &pub ) noexcept
         msg_len_digits = uint64_digits( msg_len );
       }
       if ( trail.off + frag_size == pub.msg_len ) {
-        len = ( pub.reply_len > 0 ? pub.reply_len + 1 : 0 ); /* [reply] */
+        len = ( replen > 0 ? replen + 1 : 0 ); /* [reply] */
         is_last = true;
       }
       else {
         len = 0;
       }
-      len += 4 + pub.subject_len + 1 + /* PUB <subject> */
-             msg_len_digits + 2 +      /* <size> \r\n */
-             msg_len + 2;              /* <blob> \r\n */
+      len += 4 + sublen + 1 +     /* PUB <subject> */
+             msg_len_digits + 2 + /* <size> \r\n */
+             msg_len + 2;         /* <blob> \r\n */
 
       p = concat_hdr( this->alloc( len ), "PUB ", 4 );
-      p = encode_sub( p, pub.subject, pub.subject_len );
+      p = encode_sub( p, sub, sublen );
       *p++ = ' ';
-      if ( is_last && pub.reply_len > 0 ) {
-        p = concat_hdr( p, (const char *) pub.reply, pub.reply_len );
+      if ( is_last && replen > 0 ) {
+        p = concat_hdr( p, (const char *) reply, replen );
         *p++ = ' ';
       }
       uint64_to_string( msg_len, p, msg_len_digits );
@@ -652,8 +801,43 @@ EvNatsClient::do_sub( uint32_t h,  const char *sub,  size_t sublen,
     hdr.x( queue, queue_len ).s( " " );
   hdr.u( sid, sid_digits ).s( "\r\n" );
   this->sz += hdr.len();
-  if ( nats_client_sub_verbose )
+  if ( nats_client_sub_verbose || nats_debug )
     printf( "%.*s", (int) hdr.len(), p );
+}
+
+static inline bool
+match_wildcard( const char *wild,  size_t wild_len,
+                const char *sub,  size_t sub_len ) noexcept
+{
+  const char * w   = wild,
+             * end = &wild[ wild_len ];
+  size_t       k   = 0;
+
+  for (;;) {
+    if ( k == sub_len || w == end ) {
+      if ( k == sub_len && w == end )
+        return true;
+      return false; /* no match */
+    }
+    if ( *w == '>' &&
+         ( ( w == wild || *(w-1) == '.' ) && w+1 == end ) )
+      return true;
+    else if ( *w == '*' &&
+              ( ( w   == wild || *(w-1) == '.' ) && /* * || *. || .* || .*. */
+                ( w+1 == end  || *(w+1) == '.' ) ) ) {
+      for (;;) {
+        if ( k == sub_len || sub[ k ] == '.' )
+          break;
+        k++;
+      }
+      w++;
+      continue;
+    }
+    if ( *w != sub[ k ] )
+      return false; /* no match */
+    w++;
+    k++;
+  }
 }
 
 const char *
@@ -675,6 +859,7 @@ EvNatsClient::is_wildcard( const char *subject,  size_t subject_len ) noexcept
   }
   return NULL;
 }
+
 void
 EvNatsClient::subscribe( const char *subject,  size_t subject_len,
                          const char *queue,  size_t queue_len ) noexcept
@@ -695,12 +880,61 @@ EvNatsClient::subscribe( const char *subject,  size_t subject_len,
   }
   this->idle_push_write();
 }
+
+bool
+EvNatsClient::match_filter( const char *sub,  size_t sublen ) noexcept
+{
+  if ( sublen > 7 && ::memcmp( sub, "_INBOX.", 7 ) == 0 )
+    return false;
+  if ( this->inter_subs.count == 0 && this->bcast_subs.count == 0 &&
+       this->listen_subs.count == 0 )
+    return true;
+  for ( size_t i = 0; i < this->inter_subs.count; i++ ) {
+    if ( match_wildcard( this->inter_subs.ptr[ i ],
+                        ::strlen( this->inter_subs.ptr[ i ] ),
+                        sub, sublen ) )
+      return true;
+  }
+  return false;
+}
+
+bool
+EvNatsClient::get_nsub( NotifySub &nsub,  const char *&sub,  size_t &sublen,
+                        const char *&rep,  size_t replen ) noexcept
+{
+  size_t prelen = this->prefix_len;
+
+  sub    = nsub.subject;
+  rep    = (const char *) nsub.reply;
+  sublen = nsub.subject_len;
+  replen = nsub.reply_len;
+
+  if ( prelen == 0 ||
+       ( sublen > prelen &&
+         ::memcmp( sub, this->prefix, prelen ) == 0 ) ) {
+    sub    += prelen;
+    sublen -= prelen;
+    if ( replen > prelen ) {
+      replen -= prelen;
+      rep    += prelen;
+    }
+    return true;
+  }
+  return false;
+}
+
 /* forward subscribe subject: SUB subject sid */
 void
-EvNatsClient::on_sub( NotifySub &sub ) noexcept
+EvNatsClient::on_sub( NotifySub &nsub ) noexcept
 {
-  this->do_sub( sub.subj_hash, sub.subject, sub.subject_len, NULL, 0 );
-  this->idle_push_write();
+  const char * sub, * rep;
+  size_t sublen, replen = 0;
+  if ( this->get_nsub( nsub, sub, sublen, rep, replen ) ) {
+    if ( this->match_filter( sub, sublen ) ) {
+      this->do_sub( kv_crc_c( sub, sublen, 0 ), sub, sublen, NULL, 0 );
+      this->idle_push_write();
+    }
+  }
 }
 void
 EvNatsClient::do_unsub( uint32_t h,  const char *sub,  size_t sublen ) noexcept
@@ -716,7 +950,7 @@ EvNatsClient::do_unsub( uint32_t h,  const char *sub,  size_t sublen ) noexcept
     uint32_to_string( sid, p, sid_digits );
     p = &p[ sid_digits ];
     *p++ = '\r'; *p++ = '\n';
-    if ( nats_client_sub_verbose )
+    if ( nats_client_sub_verbose || nats_debug )
       printf( "%.*s", (int) len, s );
     this->sz += len;
     this->idle_push_write();
@@ -724,11 +958,17 @@ EvNatsClient::do_unsub( uint32_t h,  const char *sub,  size_t sublen ) noexcept
 }
 /* forward unsubscribe subject: UNSUB sid */
 void
-EvNatsClient::on_unsub( NotifySub &sub ) noexcept
+EvNatsClient::on_unsub( NotifySub &nsub ) noexcept
 {
-  if ( sub.sub_count != 0 ) /* if no routes left */
+  const char * sub, * rep;
+  size_t sublen, replen = 0;
+  if ( nsub.sub_count != 0 ) /* if no routes left */
     return;
-  this->do_unsub( sub.subj_hash, sub.subject, sub.subject_len );
+  if ( this->get_nsub( nsub, sub, sublen, rep, replen ) ) {
+    if ( this->match_filter( sub, sublen ) ) {
+      this->do_unsub( kv_crc_c( sub, sublen, 0 ), sub, sublen );
+    }
+  }
 }
 void
 EvNatsClient::unsubscribe( const char *subject,  size_t subject_len ) noexcept
@@ -790,53 +1030,65 @@ EvNatsClient::do_psub( uint32_t h,  const char *prefix,
     hdr.x( queue, queue_len ).s( " " );
   hdr.s( "-" ).u( sid, sid_digits ).s( "\r\n" );
   this->sz += hdr.len();
-  if ( nats_client_sub_verbose )
+  if ( nats_client_sub_verbose || nats_debug )
     printf( "%.*s", (int) hdr.len(), p );
 }
 /* forward pattern subscribe: SUB wildcard -sid */
 void
 EvNatsClient::on_psub( NotifyPattern &pat ) noexcept
 {
-  size_t prefix_len = pat.cvt.prefixlen;
-  const char * prefix = pat.pattern;
-  bool fwd;
-  /* prefix must end with a '.' */
-  if ( prefix_len > 0 && prefix[ prefix_len - 1 ] == '.' )
-    fwd = true;
-  else if ( prefix_len > 0 ) {
-    fprintf( stderr, "unable psub, no segment \"%.*s\"\n", 
-             (int) prefix_len, prefix );
-    fwd = false;
-  }
-  else
-    fwd = true;
-  if ( ! fwd )
-    return;
-  this->do_psub( pat.prefix_hash, prefix, prefix_len, NULL, 0 );
+  this->fwd_pat( pat, true );
   this->idle_push_write();
 }
-/* forward pattern unsubscribe: UNSUB -sid */
+
 void
 EvNatsClient::on_punsub( NotifyPattern &pat ) noexcept
 {
-  size_t prefix_len = pat.cvt.prefixlen;
-  const char * prefix = pat.pattern;
-  if ( pat.sub_count != 0 ) /* if no routes left */
-    return;
-  bool fwd;
-  /* prefix must end with a '.' */
-  if ( prefix_len > 0 && prefix[ prefix_len - 1 ] == '.' )
-    fwd = true;
-  else if ( prefix_len > 0 ) {
-    fprintf( stderr, "unable punsub, no segment \"%.*s\"\n", 
-             (int) prefix_len, prefix );
-    fwd = false;
+  this->fwd_pat( pat, false );
+}
+
+void
+EvNatsClient::fwd_pat( NotifyPattern &pat,  bool is_psub ) noexcept
+{
+  size_t prelen = this->prefix_len;
+
+  char         sub[ 1024 ];
+  const char * p;
+  size_t       plen;
+
+  if ( pat.cvt.fmt != RV_PATTERN_FMT ) {
+    size_t sublen = pat.cvt.prefixlen;
+    if ( sublen > sizeof( sub ) - 3 )
+      sublen = sizeof( sub ) - 3;
+
+    ::memcpy( sub, pat.pattern, sublen );
+    if ( sublen != 0 ) {
+      sub[ sublen++ ] = '.';
+    }
+    sub[ sublen++ ] = '>';
+    sub[ sublen ] = '\0';
+    p    = sub;
+    plen = sublen;
   }
-  else
-    fwd = true;
-  if ( ! fwd )
-    return;
-  this->do_punsub( pat.prefix_hash, prefix, prefix_len );
+  else {
+    p    = pat.pattern;
+    plen = pat.pattern_len;
+  }
+  if ( prelen == 0 ||
+       ( plen > prelen &&
+         ::memcmp( p, this->prefix, prelen ) == 0 ) ) {
+    p    += prelen;
+    plen -= prelen;
+    if ( this->match_filter( p, plen ) ) {
+      plen = pat.cvt.prefixlen;
+      plen -= prelen;
+      uint32_t h = kv_crc_c( p, plen, this->sub_route.prefix_seed( plen ) );
+      if ( is_psub )
+        this->do_psub( h, p, plen, NULL, 0 );
+      else
+        this->do_punsub( h, p, plen );
+    }
+  }
 }
 
 void
@@ -860,7 +1112,7 @@ EvNatsClient::do_punsub( uint32_t h,  const char *prefix,
     p = &p[ sid_digits ];
     *p++ = '\r'; *p++ = '\n';
     this->sz += len;
-    if ( nats_client_sub_verbose )
+    if ( nats_client_sub_verbose || nats_debug )
       printf( "%.*s", (int) len, s );
     this->idle_push_write();
   }
@@ -891,7 +1143,7 @@ EvNatsClient::parse_info( const char *buf,  size_t bufsz ) noexcept
 {
   const char * start, * end;/*, * p, * v, * comma;*/
 
-  if ( nats_client_info_verbose )
+  if ( nats_client_info_verbose || nats_debug )
     printf( "%.*s", (int) bufsz, buf );
   if ( (start = (const char *) ::memchr( buf, '{', bufsz )) != NULL ) {
     bufsz -= start - buf;
@@ -980,7 +1232,7 @@ EvNatsClient::parse_info( const char *buf,  size_t bufsz ) noexcept
                      "\"verbose\":false,\"echo\":false,\"binary\":true}\r\n" );
     len += min_int( n, (int) bsz - 1 );
   }
-  if ( nats_client_cmd_verbose )
+  if ( nats_client_cmd_verbose || nats_debug )
     printf( "%.*s", len, outbuf );
   this->append( outbuf, len );
   /* if all subs are forwarded to NATS */
@@ -990,6 +1242,12 @@ EvNatsClient::parse_info( const char *buf,  size_t bufsz ) noexcept
   if ( this->fwd_all_msgs ) {
     uint32_t h = this->sub_route.prefix_seed( 0 );
     this->sub_route.add_pattern_route( h, this->fd, 0 );
+  }
+  if ( this->bcast_subs.count > 0 ) {
+    for ( size_t i = 0; i < this->bcast_subs.count; i++ ) {
+      const char *s = this->bcast_subs.ptr[ i ];
+      this->subscribe( s, ::strlen( s ), NULL, 0 );
+    }
   }
   /* done, notify connected, may be -ERR later if conn fails to authenticate */
   if ( this->notify != NULL )
@@ -1005,14 +1263,21 @@ EvNatsClient::release( void ) noexcept
   }
   if ( this->fwd_all_subs && this->cb == NULL )
     this->sub_route.remove_route_notify( *this );
+  if ( this->notify != NULL )
+    this->notify->on_shutdown( *this, this->err, this->err_len );
   this->release_fragments();
   if ( this->sid_ht != NULL ) {
     delete this->sid_ht;
     this->sid_ht = NULL;
   }
   this->pat_tab.release();
-  if ( this->notify != NULL )
-    this->notify->on_shutdown( *this, this->err, this->err_len );
+  if ( this->param_buf != NULL ) {
+    ::free( this->param_buf );
+    this->param_buf = NULL; 
+  }   
+  this->inter_subs.release();
+  this->bcast_subs.release();
+  this->listen_subs.release();
   this->EvConnection::release_buffers();
 }
 

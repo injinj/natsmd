@@ -106,12 +106,15 @@ struct EvNatsClientParameters {
              * auth_token;
   int          port,
                opts;
+  const struct addrinfo *ai;
+  const char * k;
+  uint32_t     rte_id;
   EvNatsClientParameters( const char *h = NULL,  const char *n = NULL,
                           const char *u = NULL,  const char *x = NULL,
                           const char *t = NULL,  int p = 4222,
                           int o = kv::DEFAULT_TCP_CONNECT_OPTS )
     : host( h ), name( n ), lang( "C" ), version( NULL ), user( u ), pass( x ),
-      auth_token( t ), port( p ), opts( o ) {}
+      auth_token( t ), port( p ), opts( o ), ai( 0 ), k( 0 ), rte_id( 0 ) {}
 };
 
 struct NatsClientCB {
@@ -134,44 +137,41 @@ struct EvNatsClient : public kv::EvConnection, public kv::RouteNotify {
                  fwd_all_subs; /* send subscriptons */
   uint32_t       wild_prefix_char[ 3 ]; /* first char of wildcard [ '!' -> 127 ]*/
   size_t         max_payload;  /* 1024 * 1024 */
-  const char   * name,         /* CONNECT parm:  name="service" */
-               * lang,                        /* lang="C" */
-               * version,                     /* version="1.0" */
-               * user,                        /* user="network" */
-               * pass,                        /* pass="xxx" */
-               * auth_token;                  /* auth_token="xxx" */
+
   kv::DLinkList<NatsFragment> frags_pending;  /* large message fragments */
   SidHashTab                * sid_ht;         /* sub to sid */
   kv::RouteVec<NatsPrefix>    pat_tab;        /* wildcard patterns */
-  uint32_t wild_prefix_char_cnt[ 96 ];        /* count of all wildcard[ 0 ] */
-  char           session[ 64 ];
-  uint16_t       session_len;
 
+  uint32_t        wild_prefix_char_cnt[ 96 ];  /* count of all wildcard[ 0 ] */
+  char            prefix[ MAX_PREFIX_LEN ],
+                  session[ MAX_SESSION_LEN ];
+  uint16_t        prefix_len,
+                  session_len;
+
+  kv::StrArray<1> inter_subs, bcast_subs, listen_subs;
+  const char    * name,         /* CONNECT parm:  name="service" */
+                * lang,                        /* lang="C" */
+                * version,                     /* version="1.0" */
+                * user,                        /* user="network" */
+                * pass,                        /* pass="xxx" */
+                * auth_token;                  /* auth_token="xxx" */
+  void          * param_buf;
+
+  EvNatsClient( kv::EvPoll &p,  kv::RoutePublish &sr,
+                kv::EvConnectionNotify *n ) noexcept;
   EvNatsClient( kv::EvPoll &p ) noexcept;
-  static EvNatsClient * create_nats_client( kv::EvPoll &p ) noexcept;
-  /* connect to a NATS server */
-  bool connect( EvNatsClientParameters &p,
-                kv::EvConnectionNotify *n = NULL,
-                NatsClientCB *c = NULL ) noexcept;
+
+  virtual int connect( kv::EvConnectParam &param ) noexcept;
+  bool nats_connect( EvNatsClientParameters &p,
+                     kv::EvConnectionNotify *n = NULL,
+                     NatsClientCB *c = NULL ) noexcept;
   bool is_connected( void ) const {
     return this->EvSocket::fd != -1;
   }
   void make_session( void ) noexcept;
   uint16_t make_inbox( char *inbox, uint64_t num ) noexcept;
   uint64_t is_inbox( const char *sub,  size_t sub_len ) noexcept;
-
-  void initialize_state( void ) {
-    this->err         = NULL;
-    this->err_len     = 0;
-    this->next_sid    = 1;
-    this->session_len = 0;
-    if ( this->sid_ht == NULL )
-      this->sid_ht = SidHashTab::resize( NULL );
-    for ( int i = 0; i < 3; i++ )
-      this->wild_prefix_char[ i ] = 0;
-    for ( int j = 0; j < 96; j++ )
-      this->wild_prefix_char_cnt[ j ] = 0;
-  }
+  void initialize_state( void ) noexcept;
   /* track which subjects are wildcards by first char */
   void set_wildcard_match( uint8_t c ) { /* 0 = all subjects */
     uint8_t bit = ( c > ' ' ? ( ( c - ' ' ) & 0x5fU ) : 0 );
@@ -214,12 +214,14 @@ struct EvNatsClient : public kv::EvConnection, public kv::RouteNotify {
   void save_error( const char *buf,  size_t len ) noexcept;
 
   /* EvSocket */
+  virtual void set_prefix( const char *pref,  size_t preflen ) noexcept;
   virtual void process( void ) noexcept; /* decode read buffer */
   virtual void process_close( void ) noexcept;
   virtual void release( void ) noexcept; /* after shutdown release mem */
   virtual bool on_msg( kv::EvPublish &pub ) noexcept; /* fwd to NATS network */
   bool publish( kv::EvPublish &pub ) noexcept;
-
+  bool publish2( kv::EvPublish &pub,  const char *sub,  size_t sublen,
+                 const char *reply,  size_t replen ) noexcept;
   /* track the sid of subjects for UNSUB */
   uint32_t create_sid( uint32_t h,  const char *sub,  size_t sublen,
                        bool &is_new ) noexcept;
@@ -233,6 +235,9 @@ struct EvNatsClient : public kv::EvConnection, public kv::RouteNotify {
   const char * is_wildcard( const char *subject,  size_t subject_len ) noexcept;
   void subscribe( const char *subject,  size_t subject_len,
                   const char *queue,  size_t queue_len ) noexcept;
+  bool match_filter( const char *sub,  size_t sublen ) noexcept;
+  bool get_nsub( kv::NotifySub &nsub,  const char *&sub,  size_t &sublen,
+                 const char *&rep,  size_t replen ) noexcept;
   /* an unsubscribed sub */
   void do_unsub( uint32_t h,  const char *sub,  size_t sublen ) noexcept;
   virtual void on_unsub( kv::NotifySub &sub ) noexcept;
@@ -244,6 +249,7 @@ struct EvNatsClient : public kv::EvConnection, public kv::RouteNotify {
   /* an unsubscribed pattern sub */
   void do_punsub( uint32_t h, const char *prefix, size_t prefix_len ) noexcept;
   virtual void on_punsub( kv::NotifyPattern &pat ) noexcept;
+  void fwd_pat( kv::NotifyPattern &pat,  bool is_psub ) noexcept;
   /* reassert subs after reconnect */
   virtual void on_reassert( uint32_t fd,  kv::RouteVec<kv::RouteSub> &sub_db,
                             kv::RouteVec<kv::RouteSub> &pat_db ) noexcept;
