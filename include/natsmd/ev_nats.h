@@ -98,7 +98,7 @@ struct NatsMsgTransform {
   }
 
   void check_transform( bool bin ) {
-    if ( bin || this->msg_len == 0 || this->msg_enc == md::MD_STRING )
+    if ( bin || this->msg_len == 0 || this->msg_enc == MD_STRING )
       return;
     this->transform();
   }
