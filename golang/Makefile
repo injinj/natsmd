@@ -35,12 +35,19 @@ CGO_LDFLAGS += -Wl,-rpath,$(CURDIR)/../../raikv/$(build_dir)/lib64 -Wl,-rpath,$(
 # Default target
 all: $(PROGRAM)
 
+# Download dependencies
+deps:
+	go mod tidy
+	go mod download
+
 # Build the program
-$(PROGRAM): $(SOURCE)
+$(PROGRAM): $(SOURCE) go.mod
+	go mod tidy
+	go mod download
 	go build -o $(PROGRAM) $(SOURCE)
 
 # Clean build artifacts
 clean:
 	rm -f $(PROGRAM)
 
-.PHONY: all clean
+.PHONY: all clean deps
