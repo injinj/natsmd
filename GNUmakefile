@@ -183,7 +183,9 @@ dlnk_lib    += -lhdrhist
 hdr_includes = -I/usr/include/hdrhist
 endif
 
-natsmd_lib := $(libd)/libnatsmd.a
+natsmd_lib      := $(libd)/libnatsmd.a
+natsmd_dlnk_lib := -L$(pwd)/$(libd) -lnatsmd
+natsmd_dlnk_dep := $(libd)/libnatsmd.$(dll)
 rpath      := -Wl,-rpath,$(pwd)/$(libd)$(rpath1)$(rpath2)$(rpath3)$(rpath4)$(rpath5)$(rpath6)$(rpath7)
 lnk_lib    += -Wl,--pop-state
 
@@ -261,6 +263,43 @@ $(libd)/libnatsmd.$(dll): $(libnatsmd_dbjs) $(dlnk_dep)
 all_libs    += $(libd)/libnatsmd.a
 all_dlls    += $(libd)/libnatsmd.$(dll)
 all_depends += $(libnatsmd_deps)
+
+# --- libnatsapi: the thread-safe consumer / publisher api
+# (include/natsmd/natsapi.h) over libnatsmd + raikv's ev_api_queue core;
+# mirrors omm's libommapi and sassrv's librv7lib ----------------------------
+nats_api_defines := -DNATSMD_VER=$(ver_build)
+$(objd)/nats_api.o : .copr/Makefile
+$(objd)/nats_api.fpic.o : .copr/Makefile
+libnatsapi_files := nats_api
+libnatsapi_cfile := $(addprefix src/, $(addsuffix .cpp, $(libnatsapi_files)))
+libnatsapi_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(libnatsapi_files)))
+libnatsapi_dbjs  := $(addprefix $(objd)/, $(addsuffix .fpic.o, $(libnatsapi_files)))
+libnatsapi_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(libnatsapi_files))) \
+                    $(addprefix $(dependd)/, $(addsuffix .fpic.d, $(libnatsapi_files)))
+libnatsapi_dlnk  := $(natsmd_dlnk_lib) $(dlnk_lib)
+libnatsapi_spec  := $(version)-$(build_num)_$(git_hash)
+libnatsapi_ver   := $(major_num).$(minor_num)
+
+$(libd)/libnatsapi.a: $(libnatsapi_objs)
+$(libd)/libnatsapi.$(dll): $(libnatsapi_dbjs) $(natsmd_dlnk_dep) $(dlnk_dep)
+
+all_libs    += $(libd)/libnatsapi.a
+all_dlls    += $(libd)/libnatsapi.$(dll)
+all_depends += $(libnatsapi_deps)
+natsapi_lib := $(libd)/libnatsapi.a
+
+# api sample / test: subscribe and publish with the api, print messages
+natsmd_api_client_files := api_client
+natsmd_api_client_cfile := $(addprefix src/, $(addsuffix .cpp, $(natsmd_api_client_files)))
+natsmd_api_client_objs  := $(addprefix $(objd)/, $(addsuffix .o, $(natsmd_api_client_files)))
+natsmd_api_client_deps  := $(addprefix $(dependd)/, $(addsuffix .d, $(natsmd_api_client_files)))
+natsmd_api_client_libs  := $(natsapi_lib) $(natsmd_lib)
+natsmd_api_client_lnk   := $(natsapi_lib) $(natsmd_lib) $(lnk_lib)
+
+$(bind)/natsmd_api_client$(exe): $(natsmd_api_client_objs) $(natsmd_api_client_libs) $(lnk_dep)
+
+all_exes    += $(bind)/natsmd_api_client$(exe)
+all_depends += $(natsmd_api_client_deps)
 
 server_defines := -DNATSMD_VER=$(ver_build)
 $(objd)/server.o : .copr/Makefile
@@ -373,12 +412,14 @@ $(dependd)/depend.make: $(dependd) $(all_depends)
 	@cat $(all_depends) >> $(dependd)/depend.make
 
 .PHONY: dist_bins
-dist_bins: $(all_libs) $(all_dlls) $(bind)/natsmd_server$(exe) $(bind)/natsmd_client$(exe) $(bind)/natsmd_pub$(exe) $(bind)/ping_nats$(exe)
+dist_bins: $(all_libs) $(all_dlls) $(bind)/natsmd_server$(exe) $(bind)/natsmd_client$(exe) $(bind)/natsmd_pub$(exe) $(bind)/ping_nats$(exe) $(bind)/natsmd_api_client$(exe)
 	chrpath -d $(libd)/libnatsmd.$(dll)
+	chrpath -d $(libd)/libnatsapi.$(dll)
 	chrpath -d $(bind)/natsmd_server$(exe)
 	chrpath -d $(bind)/natsmd_client$(exe)
 	chrpath -d $(bind)/natsmd_pub$(exe)
 	chrpath -d $(bind)/ping_nats$(exe)
+	chrpath -d $(bind)/natsmd_api_client$(exe)
 
 .PHONY: dist_rpm
 dist_rpm: srpm
@@ -398,7 +439,7 @@ endif
 install: dist_bins
 	install -d $(install_prefix)/lib $(install_prefix)/bin
 	install -d $(install_prefix)/include/natsmd
-	for f in $(libd)/libnatsmd.* ; do \
+	for f in $(libd)/libnatsmd.* $(libd)/libnatsapi.* ; do \
 	if [ -h $$f ] ; then \
 	cp -a $$f $(install_prefix)/lib ; \
 	else \
@@ -409,6 +450,7 @@ install: dist_bins
 	install -m 755 $(bind)/natsmd_client$(exe) $(install_prefix)/bin
 	install -m 755 $(bind)/natsmd_pub$(exe) $(install_prefix)/bin
 	install -m 755 $(bind)/ping_nats$(exe) $(install_prefix)/bin
+	install -m 755 $(bind)/natsmd_api_client$(exe) $(install_prefix)/bin
 	install -m 644 include/natsmd/*.h $(install_prefix)/include/natsmd
 
 $(objd)/%.o: src/%.cpp
