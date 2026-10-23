@@ -14,13 +14,13 @@ namespace rai {
 namespace natsmd {
 
 enum NatsSubStatus {
-  NATS_OK          = 0,
-  NATS_IS_NEW      = 1, /* new subject or pattern subscribed */
-  NATS_EXPIRED     = 2, /* subject or pattern dropped or publish == maxmsgs */
-  NATS_NOT_FOUND   = 3, /* sid not found or publish subject not found */
-  NATS_EXISTS      = 4, /* sid already mapped to a subject */
-  NATS_TOO_MANY    = 5, /* sid list size > 64K */
-  NATS_BAD_PATTERN = 6  /* failed to create pattern subscription */
+  NATS_SUB_OK          = 0,
+  NATS_SUB_IS_NEW      = 1, /* new subject or pattern subscribed */
+  NATS_SUB_EXPIRED     = 2, /* subject or pattern dropped or publish == maxmsgs */
+  NATS_SUB_NOT_FOUND   = 3, /* sid not found or publish subject not found */
+  NATS_SUB_EXISTS      = 4, /* sid already mapped to a subject */
+  NATS_SUB_TOO_MANY    = 5, /* sid list size > 64K */
+  NATS_SUB_BAD_PATTERN = 6  /* failed to create pattern subscription */
 };
 
 const char * nats_status_str( NatsSubStatus status );
@@ -181,7 +181,7 @@ struct NatsSubData {
   }
   NatsSubStatus unsub( SidEntry &entry, uint64_t max_msgs ) {
     if ( entry.subj_hash != this->hash )
-      return NATS_NOT_FOUND;
+      return NATS_SUB_NOT_FOUND;
     NatsStr sid( entry.value, entry.len );
     NatsStr xsid;
     for ( bool b = this->first_sid( xsid ); b; b = this->next_sid( xsid ) ) {
@@ -191,14 +191,14 @@ struct NatsSubData {
           if ( entry.max_msgs > this->msg_cnt ) { /* max must be more than cnt*/
             if ( this->max_msgs == 0 || entry.max_msgs < this->max_msgs )
               this->max_msgs = entry.max_msgs; /* trigger unsub on publish */
-            return NATS_OK;
+            return NATS_SUB_OK;
           }
         }
         this->remove_sid( xsid );
-        return NATS_EXPIRED; /* sid removed */
+        return NATS_SUB_EXPIRED; /* sid removed */
       }
     }
-    return NATS_NOT_FOUND; /* sid not a member of subject */
+    return NATS_SUB_NOT_FOUND; /* sid not a member of subject */
   }
   void print_sids( void ) noexcept;
 };
@@ -296,10 +296,10 @@ struct NatsSubTab
     NatsSubRoute * rt = this->find2( h, sub, len, loc, hcnt );
     if ( rt == NULL ) {
       collision = ( hcnt > 0 );
-      return NATS_NOT_FOUND;
+      return NATS_SUB_NOT_FOUND;
     }
     collision = ( hcnt > 1 );
-    return NATS_OK;
+    return NATS_SUB_OK;
   }
 };
 
@@ -326,10 +326,10 @@ struct NatsPatternTab : public kv::RouteVec<NatsPatternRoute> {
     rt = this->find2( h, sub, len, loc, hcnt );
     if ( rt == NULL ) {
       collision = ( hcnt > 0 );
-      return NATS_NOT_FOUND;
+      return NATS_SUB_NOT_FOUND;
     }
     collision = ( hcnt > 1 );
-    return NATS_OK;
+    return NATS_SUB_OK;
   }
 };
 
@@ -367,7 +367,7 @@ struct NatsSubMap {
         if ( rt != NULL && rt->match_sid( *entry ) )
           sub_rt = rt;
       }
-      return NATS_EXISTS;
+      return NATS_SUB_EXISTS;
     }
     entry->init( subj_hash, 0, quehash );
 
@@ -387,12 +387,12 @@ struct NatsSubMap {
       if ( rt == NULL ) {
         if ( loc.is_new )
           tab.remove( loc );
-        return NATS_TOO_MANY;
+        return NATS_SUB_TOO_MANY;
       }
       rt->add_sid( sid );
     }
     sub_rt = rt;
-    return loc.is_new ? NATS_IS_NEW : NATS_OK;
+    return loc.is_new ? NATS_SUB_IS_NEW : NATS_SUB_OK;
   }
   /* add a pattern and sid */
   NatsSubStatus put_wild( NatsStr &subj,  kv::PatternCvt &cvt,
@@ -430,7 +430,7 @@ struct NatsSubMap {
             sub_m = m;
         }
       }
-      return NATS_EXISTS;
+      return NATS_SUB_EXISTS;
     }
     entry->init( subj.hash(), pre.hash(), quehash );
 
@@ -452,12 +452,12 @@ struct NatsSubMap {
       if ( m == NULL ) {
         if ( loc.is_new )
           ptab.remove( loc );
-        return NATS_BAD_PATTERN;
+        return NATS_SUB_BAD_PATTERN;
       }
       rt->list.push_hd( m );
       rt->count++;
       sub_m = m;
-      return NATS_IS_NEW;
+      return NATS_SUB_IS_NEW;
     }
     /* existing wildcard match */
     if ( ! m->add_sid( sid ) ) {
@@ -465,14 +465,14 @@ struct NatsSubMap {
       m2 = NatsWildMatch::resize_sid( m, sid );
       if ( m2 == NULL ) {
         rt->list.push_hd( m );
-        return NATS_TOO_MANY;
+        return NATS_SUB_TOO_MANY;
       }
       m = m2;
       rt->list.push_hd( m );
     }
     entry->msg_cnt = m->msg_cnt;
     sub_m = m;
-    return NATS_OK;
+    return NATS_SUB_OK;
   }
   /* unsubscribe an sid */
   NatsSubStatus unsub( NatsStr &sid,  uint64_t max_msgs,  NatsLookup &look,
@@ -483,7 +483,7 @@ struct NatsSubMap {
     collision = false;
     entry = this->sid_tab.find( sid.hash(), sid.str, sid.len, sid_loc );
     if ( entry == NULL )
-      return NATS_NOT_FOUND;
+      return NATS_SUB_NOT_FOUND;
     look.que_hash = entry->que_hash;
     if ( entry->is_wild() )
       return this->unsub_wild( max_msgs, look, collision, *entry, sid_loc,
@@ -499,11 +499,11 @@ struct NatsSubMap {
     look.hash = entry.subj_hash;
     look.rt   = tab.find_by_hash( look.hash, look.loc );
     if ( look.rt == NULL )
-      return NATS_NOT_FOUND;
+      return NATS_SUB_NOT_FOUND;
     for ( uint32_t count = 0 ; ; ) {
       status = look.rt->unsub( entry, max_msgs );
-      if ( status != NATS_NOT_FOUND ) {
-        if ( status == NATS_EXPIRED ) {
+      if ( status != NATS_SUB_NOT_FOUND ) {
+        if ( status == NATS_SUB_EXPIRED ) {
           this->sid_tab.remove( sid_loc );
           if ( look.rt->refcnt == 0 ) {
             if ( count > 0 )
@@ -513,14 +513,14 @@ struct NatsSubMap {
               if ( tab.find_next_by_hash( look.hash, next ) != NULL )
                 collision = true;
             }
-            return NATS_EXPIRED;
+            return NATS_SUB_EXPIRED;
           }
         }
-        return NATS_OK;
+        return NATS_SUB_OK;
       }
       look.rt = tab.find_next_by_hash( look.hash, look.loc );
       if ( look.rt == NULL )
-        return NATS_NOT_FOUND;
+        return NATS_SUB_NOT_FOUND;
       count++;
     }
   }
@@ -532,14 +532,14 @@ struct NatsSubMap {
     look.hash = entry.pref_hash;
     look.pat  = ptab.find_by_hash( look.hash, look.loc );
     if ( look.pat == NULL )
-      return NATS_NOT_FOUND;
+      return NATS_SUB_NOT_FOUND;
     for ( uint32_t count = 0; ; ) {
       for ( NatsWildMatch *m = look.pat->list.hd; m != NULL; m = m->next ) {
         if ( m->hash == entry.subj_hash ) {
           status = m->unsub( entry, max_msgs );
-          if ( status != NATS_NOT_FOUND ) {
+          if ( status != NATS_SUB_NOT_FOUND ) {
             look.match = m;
-            if ( status == NATS_EXPIRED ) {
+            if ( status == NATS_SUB_EXPIRED ) {
               this->sid_tab.remove( sid_loc );
               if ( m->refcnt == 0 ) {
                 if ( count > 0 || look.pat->count > 1 )
@@ -549,16 +549,16 @@ struct NatsSubMap {
                   if ( ptab.find_next_by_hash( look.hash, next ) != NULL )
                     collision = true;
                 }
-                return NATS_EXPIRED;
+                return NATS_SUB_EXPIRED;
               }
             }
-            return NATS_OK;
+            return NATS_SUB_OK;
           }
         }
       }
       look.pat = ptab.find_next_by_hash( look.hash, look.loc );
       if ( look.pat == NULL )
-        return NATS_NOT_FOUND;
+        return NATS_SUB_NOT_FOUND;
       count++;
     }
   }
@@ -570,19 +570,19 @@ struct NatsSubMap {
     look.init();
     entry = this->sid_tab.find( sid.hash(), sid.str, sid.len, sid_loc );
     if ( entry == NULL )
-      return NATS_NOT_FOUND;
+      return NATS_SUB_NOT_FOUND;
 
     look.hash = entry->subj_hash;
     if ( ! entry->is_que() )
       look.rt = this->sub_tab.find_by_hash( look.hash, look.loc );
     if ( look.rt == NULL )
-      return NATS_NOT_FOUND;
+      return NATS_SUB_NOT_FOUND;
     for (;;) {
       if ( look.rt->match_sid( *entry ) )
-        return NATS_OK;
+        return NATS_SUB_OK;
       look.rt = this->sub_tab.find_next_by_hash( look.hash, look.loc );
       if ( look.rt == NULL )
-        return NATS_NOT_FOUND;
+        return NATS_SUB_NOT_FOUND;
     }
   }
   /* remove after unsubscribe */
@@ -642,9 +642,9 @@ struct NatsSubMap {
       if ( tab.find_by_hash( look.hash, loc ) != NULL &&
            tab.find_next_by_hash( look.hash, loc ) != NULL )
         collision = true;
-      return NATS_EXPIRED;
+      return NATS_SUB_EXPIRED;
     }
-    return NATS_OK;
+    return NATS_SUB_OK;
   }
   NatsSubStatus expired_pattern( NatsLookup &look,  bool &collision ) {
     collision = false;
@@ -659,9 +659,9 @@ struct NatsSubMap {
       else if ( ptab.find_by_hash( look.hash, loc ) != NULL &&
                 ptab.find_next_by_hash( look.hash, loc ) != NULL )
         collision = true;
-      return NATS_EXPIRED;
+      return NATS_SUB_EXPIRED;
     }
-    return NATS_OK;
+    return NATS_SUB_OK;
   }
   /* find the subject and sid list to publish */
   NatsSubStatus lookup_publish( NatsStr &subj,  NatsLookup &look ) {
@@ -670,12 +670,12 @@ struct NatsSubMap {
     if ( look.rt == NULL ) {
       look.rt = this->qsub_tab.find( look.hash, subj.str, subj.len, look.loc );
       if ( look.rt == NULL )
-        return NATS_NOT_FOUND;
+        return NATS_SUB_NOT_FOUND;
       look.que_hash = look.hash;
     }
     if ( ++look.rt->msg_cnt == look.rt->max_msgs )
-      return NATS_EXPIRED;
-    return NATS_OK;
+      return NATS_SUB_EXPIRED;
+    return NATS_SUB_OK;
   }
   /* find the pattern prefix and match pattern to publish */
   NatsSubStatus lookup_pattern( NatsStr &pre,  NatsStr &subj,
@@ -689,19 +689,19 @@ struct NatsSubMap {
             look.match = m;
             look.next  = m->next;
             if ( ++m->msg_cnt == m->max_msgs )
-              return NATS_EXPIRED;
-            return NATS_OK;
+              return NATS_SUB_EXPIRED;
+            return NATS_SUB_OK;
           }
         }
       }
       if ( look.que_hash == 0 ) {
         look.pat = this->qpat_tab.find( look.hash, pre.str, pre.len, look.loc );
         if ( look.pat == NULL )
-          return NATS_NOT_FOUND;
+          return NATS_SUB_NOT_FOUND;
         look.que_hash = look.hash;
       }
       else {
-        return NATS_NOT_FOUND;
+        return NATS_SUB_NOT_FOUND;
       }
     }
   }
@@ -712,11 +712,11 @@ struct NatsSubMap {
         look.match = m;
         look.next  = m->next;
         if ( ++m->msg_cnt == m->max_msgs )
-          return NATS_EXPIRED;
-        return NATS_OK;
+          return NATS_SUB_EXPIRED;
+        return NATS_SUB_OK;
       }
     }
-    return NATS_NOT_FOUND;
+    return NATS_SUB_NOT_FOUND;
   }
   void release( void ) {
     this->release_pat_tab( this->pat_tab );

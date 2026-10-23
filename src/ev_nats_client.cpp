@@ -298,7 +298,7 @@ void
 EvNatsClient::make_session( void ) noexcept
 {
   uint64_t now = kv_current_realtime_ns(), mo = kv_current_monotonic_time_ns();
-  char host[ 256 ], inbox[ 8 + 64 ];
+  char host[ 256 ];
   ::gethostname( host, sizeof( host ) );
   uint32_t x[ 2 ];
   x[ 0 ] = kv_crc_c( host, ::strlen( host ), (uint32_t) now );
@@ -312,6 +312,13 @@ EvNatsClient::make_session( void ) noexcept
       now /= 26;
     }
   }
+  return this->subscribe_inbox();
+}
+
+void
+EvNatsClient::subscribe_inbox( void ) noexcept
+{
+  char inbox[ 8 + 64 ];
   ::memcpy( inbox, "_INBOX.", 7 );
   ::memcpy( &inbox[ 7 ], this->session, this->session_len );
 

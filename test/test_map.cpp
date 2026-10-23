@@ -76,7 +76,7 @@ main( void )
         if ( subj.is_wild() ) {
           PatternCvt cvt;
           if ( cvt.convert_rv( subj.str, subj.len ) != 0 )
-            status = NATS_BAD_PATTERN;
+            status = NATS_SUB_BAD_PATTERN;
           else {
             NatsStr pre( subj.str, cvt.prefixlen );
             NatsWildMatch * sub_m;
@@ -99,7 +99,7 @@ main( void )
         sid.set ( args[ 1 ], arglen[ 1 ] );
         status = map.unsub( sid, maxmsgs, look, coll );
         printf( "%s coll=%s\n", nats_status_str( status ), coll ? "t" : "f" );
-        if ( status == NATS_EXPIRED ) {
+        if ( status == NATS_SUB_EXPIRED ) {
           if ( look.rt != NULL )
             printf( "remove %.*s\n", look.rt->len, look.rt->value );
           else
@@ -113,15 +113,15 @@ main( void )
         subj.set( args[ 1 ], arglen[ 1 ] );
         msg.set( args[ 2 ], arglen[ 2 ] );
         status = map.lookup_publish( subj, look );
-        if ( status != NATS_NOT_FOUND ) {
+        if ( status != NATS_SUB_NOT_FOUND ) {
           for ( b = look.rt->first_sid( sid ); b;
                 b = look.rt->next_sid( sid ) ) {
             printf( "pub %.*s -> %.*s\n", msg.len, msg.str, sid.len, sid.str );
           }
-          if ( status == NATS_EXPIRED ) {
+          if ( status == NATS_SUB_EXPIRED ) {
             status = map.expired( look, coll );
             printf( "%s coll=%s\n", nats_status_str( status ), coll ? "t" : "f" );
-            if ( status == NATS_EXPIRED ) {
+            if ( status == NATS_SUB_EXPIRED ) {
               printf( "remove %.*s\n", look.rt->len, look.rt->value );
               map.unsub_remove( look );
             }
@@ -133,7 +133,7 @@ main( void )
           pre.set( args[ 1 ], i );
           status = map.lookup_pattern( pre, subj, look );
           for (;;) {
-            if ( status == NATS_NOT_FOUND )
+            if ( status == NATS_SUB_NOT_FOUND )
               break;
             for ( b = look.match->first_sid( sid ); b;
                   b = look.match->next_sid( sid ) ) {
@@ -141,10 +141,10 @@ main( void )
                       msg.len, msg.str, sid.len, sid.str,
                       look.match->len, look.match->value );
             }
-            if ( status == NATS_EXPIRED ) {
+            if ( status == NATS_SUB_EXPIRED ) {
               status = map.expired_pattern( look, coll );
               printf( "%s coll=%s\n", nats_status_str( status ), coll ? "t" : "f" );
-              if ( status == NATS_EXPIRED ) {
+              if ( status == NATS_SUB_EXPIRED ) {
                 printf( "remove %.*s\n", look.match->len, look.match->value );
                 map.unsub_remove( look );
                 break;

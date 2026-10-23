@@ -174,6 +174,7 @@ struct EvNatsClient : public kv::EvConnection, public kv::RouteNotify {
     return this->EvSocket::fd != -1;
   }
   void make_session( void ) noexcept;
+  void subscribe_inbox( void ) noexcept;
   uint16_t make_inbox( char *inbox, uint64_t num ) noexcept;
   uint64_t is_inbox( const char *sub,  size_t sub_len ) noexcept;
   void initialize_state( void ) noexcept;

@@ -114,13 +114,11 @@ typedef struct {
 /* fill defaults */
 void nats_InitTransportParams( natsTransportParams *p );
 
-/* ---- api ------------------------------------------------------------------ */
 nats_status  nats_Open( void );
 nats_status  nats_Close( void );
 const char * nats_Version( void );
 const char * natsStatus_GetText( nats_status status );
 
-/* ---- transport ------------------------------------------------------------ */
 nats_status natsTransport_Create( natsTransport *tport,
                                   const natsTransportParams *parms );
 nats_status natsTransport_Destroy( natsTransport tport );
@@ -162,7 +160,6 @@ nats_status natsTransport_SetStateListener( natsTransport tport,
                                             const void *closure,
                                             natsEvent *event );
 
-/* ---- queues --------------------------------------------------------------- */
 typedef void ( *natsQueueOnComplete )( natsQueue queue,  void *closure );
 
 nats_status natsQueue_Create( natsQueue *queue );
@@ -195,7 +192,6 @@ nats_status natsDispatcher_Destroy( natsDispatcher disp );
 nats_status natsDispatcher_SetName( natsDispatcher disp,  const char *name );
 nats_status natsDispatcher_GetName( natsDispatcher disp,  const char **name );
 
-/* ---- events --------------------------------------------------------------- */
 typedef enum {
   NATS_TIMER_EVENT     = 1,
   NATS_LISTEN_EVENT    = 3,
@@ -237,7 +233,6 @@ nats_status natsEvent_GetListenerTransport( natsEvent event,
 nats_status natsEvent_GetTimerInterval( natsEvent event,  double *interval );
 nats_status natsEvent_ResetTimerInterval( natsEvent event,  double interval );
 
-/* ---- messages ------------------------------------------------------------- */
 /* message classes: a data message from a subscription, or the api's own
  * transport state notifications */
 typedef enum {
@@ -246,8 +241,8 @@ typedef enum {
   NATS_MSG_TRANSPORT_DOWN = 101
 } natsMsgClass;
 
-/* --- received messages (valid during the callback, or until
- * natsMsg_Destroy() after natsMsg_Detach()) --- */
+/* received messages (valid during the callback, or until
+ * natsMsg_Destroy() after natsMsg_Detach()) */
 nats_status natsMsg_GetSubject( natsMsg msg,  const char **subject );
 /* the reply subject, "" when none */
 nats_status natsMsg_GetReplySubject( natsMsg msg,  const char **reply );
@@ -268,8 +263,8 @@ nats_status natsMsg_Destroy( natsMsg msg );
 /* print the subject line and the decoded payload to fp (stdout when NULL) */
 nats_status natsMsg_Print( natsMsg msg,  void *fp );
 
-/* --- messages built for natsTransport_SendMsg() (owned by the caller,
- * natsMsg_Destroy() releases them; the setters copy their arguments) --- */
+/* messages built for natsTransport_SendMsg() (owned by the caller,
+ * natsMsg_Destroy() releases them; the setters copy their arguments) */
 nats_status natsMsg_Create( natsMsg *msg );
 nats_status natsMsg_SetSendSubject( natsMsg msg,  const char *subject );
 nats_status natsMsg_SetReplySubject( natsMsg msg,  const char *reply );

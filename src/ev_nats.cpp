@@ -462,12 +462,12 @@ EvNatsService::is_subscribed( const NotifySub &sub ) noexcept
   bool    coll = false;
   if ( ! sub.is_notify_queue() ) {
     if ( this->map.sub_tab.find3( sub.subj_hash, sub.subject, sub.subject_len,
-                                  coll ) == NATS_OK )
+                                  coll ) == NATS_SUB_OK )
       v |= EV_SUBSCRIBED;
   }
   else {
     if ( this->map.qsub_tab.find3( sub.subj_hash, sub.subject, sub.subject_len,
-                                   coll ) == NATS_OK )
+                                   coll ) == NATS_SUB_OK )
       v |= EV_SUBSCRIBED;
   }
   if ( v == 0 )
@@ -493,7 +493,7 @@ EvNatsService::is_psubscribed( const NotifyPattern &pat ) noexcept
     status = this->map.qpat_tab.find3( pat.prefix_hash, pat.pattern,
                                        cvt.prefixlen, rt, coll );
   }
-  if ( status == NATS_OK ) {
+  if ( status == NATS_SUB_OK ) {
     NatsWildMatch *m;
     for ( m = rt->list.hd; m != NULL; m = m->next ) {
       if ( m->len == pat.pattern_len &&
@@ -554,7 +554,7 @@ EvNatsService::add_sub( NatsMsg &msg ) noexcept
   if ( subj.is_wild() ) {
     PatternCvt cvt;
     if ( cvt.convert_rv( subj.str, subj.len ) != 0 )
-      status = NATS_BAD_PATTERN;
+      status = NATS_SUB_BAD_PATTERN;
     else {
       uint32_t h = kv_crc_c( subj.str, cvt.prefixlen,
                              this->sub_route.prefix_seed( cvt.prefixlen ) );
@@ -565,11 +565,11 @@ EvNatsService::add_sub( NatsMsg &msg ) noexcept
       else
         status = this->map.put_wild_que( subj, cvt, pre, sid, coll, sub_m,
                                          quehash );
-      if ( status == NATS_IS_NEW || status == NATS_OK ||
-           ( status == NATS_EXISTS && sub_m != NULL ) ) {
+      if ( status == NATS_SUB_IS_NEW || status == NATS_SUB_OK ||
+           ( status == NATS_SUB_EXISTS && sub_m != NULL ) ) {
         NotifyPatternQueue npat( cvt, subj.str, subj.len, h,
                                  coll, 'N', *this, que, quelen, quehash );
-        if ( status == NATS_IS_NEW ) {
+        if ( status == NATS_SUB_IS_NEW ) {
           if ( quelen == 0 )
             this->sub_route.add_pat( npat );
           else
@@ -602,11 +602,11 @@ EvNatsService::add_sub( NatsMsg &msg ) noexcept
       status = this->map.put( subj, sid, coll, sub_rt );
     else
       status = this->map.put_que( subj, sid, coll, sub_rt, quehash );
-    if ( status == NATS_IS_NEW || status == NATS_OK ||
-         ( status == NATS_EXISTS && sub_rt != NULL ) ) {
+    if ( status == NATS_SUB_IS_NEW || status == NATS_SUB_OK ||
+         ( status == NATS_SUB_EXISTS && sub_rt != NULL ) ) {
       NotifyQueue nsub( subj.str, subj.len, inbox, inbox_len, subj.hash(),
                         coll, 'N', *this, que, quelen, quehash );
-      if ( status == NATS_IS_NEW ) {
+      if ( status == NATS_SUB_IS_NEW ) {
         if ( quelen == 0 )
           this->sub_route.add_sub( nsub );
         else
@@ -621,7 +621,7 @@ EvNatsService::add_sub( NatsMsg &msg ) noexcept
       }
     }
   }
-  if ( status > NATS_EXISTS ) {
+  if ( status > NATS_SUB_EXISTS ) {
     fprintf( stderr, "add_sub( %.*s, %.*s ) = %s\n",
              subj.len, subj.str, sid.len, sid.str, nats_status_str( status ) );
   }
@@ -636,11 +636,11 @@ EvNatsService::rem_sid( NatsMsg &msg ) noexcept
   bool          coll = false;
 
   status = this->map.unsub( sid, msg.max_msgs, look, coll );
-  if ( status != NATS_NOT_FOUND ) {
+  if ( status != NATS_SUB_NOT_FOUND ) {
     if ( look.rt != NULL ) {
       NotifyQueue nsub( look.rt->value, look.rt->subj_len, NULL, 0, look.hash,
                         coll, 'N', *this, NULL, 0, look.que_hash );
-      if ( status == NATS_EXPIRED ) {
+      if ( status == NATS_SUB_EXPIRED ) {
         if ( look.que_hash == 0 )
           this->sub_route.del_sub( nsub );
         else
@@ -660,7 +660,7 @@ EvNatsService::rem_sid( NatsMsg &msg ) noexcept
       if ( cvt.convert_rv( look.match->value, look.match->subj_len ) == 0 ) {
         NotifyPatternQueue npat( cvt, look.match->value, look.match->subj_len,
                           look.hash, coll, 'N', *this, NULL, 0, look.que_hash );
-        if ( status == NATS_EXPIRED ) {
+        if ( status == NATS_SUB_EXPIRED ) {
           if ( look.que_hash == 0 )
             this->sub_route.del_pat( npat );
           else
@@ -793,15 +793,15 @@ EvNatsService::on_msg( EvPublish &pub ) noexcept
     if ( pub.subj_hash == h ) {
       subj.set( pub.subject, pub.subject_len, h );
       status = this->map.lookup_publish( subj, look );
-      if ( status != NATS_NOT_FOUND ) { /* OK or EXPIRED */
+      if ( status != NATS_SUB_NOT_FOUND ) { /* OK or EXPIRED */
         for ( b = look.rt->first_sid( sid ); b; b = look.rt->next_sid( sid ) ) {
           flow_good &= this->fwd_msg( pub, xf );
         }
-        if ( status == NATS_EXPIRED ) {
+        if ( status == NATS_SUB_EXPIRED ) {
           status = this->map.expired( look, coll );
           NotifyQueue nsub( subj.str, subj.len, NULL, 0, h, coll, 'N', *this,
                             NULL, 0, look.que_hash );
-          if ( status == NATS_EXPIRED ) {
+          if ( status == NATS_SUB_EXPIRED ) {
             if ( look.que_hash == 0 )
               this->sub_route.del_sub( nsub );
             else
@@ -824,7 +824,7 @@ EvNatsService::on_msg( EvPublish &pub ) noexcept
       status = this->map.lookup_pattern( pre, subj, look );
 
       for (;;) {
-        if ( status == NATS_NOT_FOUND )
+        if ( status == NATS_SUB_NOT_FOUND )
           break;
         for ( b = look.match->first_sid( sid ); b;
               b = look.match->next_sid( sid ) ) {
@@ -832,14 +832,14 @@ EvNatsService::on_msg( EvPublish &pub ) noexcept
             return this->on_inbox_reply( pub );
           flow_good &= this->fwd_msg( pub, xf );
         }
-        if ( status == NATS_EXPIRED ) {
+        if ( status == NATS_SUB_EXPIRED ) {
           status = this->map.expired_pattern( look, coll );
           PatternCvt cvt;
           NotifyPatternQueue npat( cvt, look.match->value, look.match->subj_len,
                                   h, coll, 'N', *this, NULL, 0, look.que_hash );
           if ( cvt.convert_rv( look.match->value,
                                look.match->subj_len ) == 0 ) {
-            if ( status == NATS_EXPIRED ) {
+            if ( status == NATS_SUB_EXPIRED ) {
               if ( look.que_hash == 0 )
                 this->sub_route.del_pat( npat );
               else
@@ -875,7 +875,7 @@ EvNatsService::on_inbox_reply( EvPublish &pub ) noexcept
   size_t       sid_len = pub.subject_len - off;
   NatsStr sid2( sid, sid_len );
   NatsLookup look;
-  if ( this->map.find_by_sid( sid2, look ) == NATS_OK &&
+  if ( this->map.find_by_sid( sid2, look ) == NATS_SUB_OK &&
        look.rt != NULL ) {
     EvPublish pub2( pub );
     MDMsgMem  tmp;
@@ -1462,13 +1462,13 @@ const char *
 rai::natsmd::nats_status_str( NatsSubStatus status )
 {
   switch ( status ) {
-    case NATS_OK          : return "nats_ok";
-    case NATS_IS_NEW      : return "nats_is_new";
-    case NATS_EXPIRED     : return "nats_expired";
-    case NATS_NOT_FOUND   : return "nats_not_found";
-    case NATS_EXISTS      : return "nats_exists";
-    case NATS_TOO_MANY    : return "nats_too_many";
-    case NATS_BAD_PATTERN : return "nats_bad_pattern";
+    case NATS_SUB_OK          : return "nats_sub_ok";
+    case NATS_SUB_IS_NEW      : return "nats_sub_is_new";
+    case NATS_SUB_EXPIRED     : return "nats_sub_expired";
+    case NATS_SUB_NOT_FOUND   : return "nats_sub_not_found";
+    case NATS_SUB_EXISTS      : return "nats_sub_exists";
+    case NATS_SUB_TOO_MANY    : return "nats_sub_too_many";
+    case NATS_SUB_BAD_PATTERN : return "nats_sub_bad_pattern";
     default: return "??";
   }
 }
