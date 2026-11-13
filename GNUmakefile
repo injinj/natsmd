@@ -58,7 +58,13 @@ CC          ?= gcc
 CXX         ?= g++
 cc          := $(CC) -std=c11
 cpp         := $(CXX)
-arch_cflags := -mavx -maes -fno-omit-frame-pointer
+ifeq ($(filter $(uname_m),aarch64 arm64),$(uname_m))
+  arch_cflags := -march=armv8-a+crc -fno-omit-frame-pointer
+else ifeq ($(filter $(uname_m),x86_64 i686 i386),$(uname_m))
+  arch_cflags := -mavx -maes -fno-omit-frame-pointer
+else
+  arch_cflags := -fno-omit-frame-pointer
+endif
 gcc_wflags  := -Wall -Wextra
 #-Werror
 # if windows cross compile
@@ -90,6 +96,7 @@ CFLAGS ?= $(build_cflags) $(default_cflags)
 #CFLAGS ?= $(RPM_OPT_FLAGS)
 #endif
 cflags := $(gcc_wflags) $(CFLAGS) $(arch_cflags)
+cxxflags := $(filter-out -Werror=implicit-function-declaration,$(cflags))
 lflags := -Wno-stringop-overflow
 
 INCLUDES  ?= -Iinclude
@@ -115,7 +122,6 @@ test_makefile = $(shell if [ -f ./$(1)/GNUmakefile ] ; then echo ./$(1) ; \
 md_home     := $(call test_makefile,raimd)
 dec_home    := $(call test_makefile,libdecnumber)
 kv_home     := $(call test_makefile,raikv)
-hdr_home    := $(call test_makefile,HdrHistogram_c)
 
 ifeq (,$(dec_home))
 dec_home    := $(call test_makefile,$(md_home)/libdecnumber)
@@ -168,21 +174,6 @@ lnk_lib     += -lraikv
 dlnk_lib    += -lraikv
 endif
 
-ifneq (,$(hdr_home))
-hdr_lib      := $(hdr_home)/$(libd)/libhdrhist.a
-hdr_dll      := $(hdr_home)/$(libd)/libhdrhist.$(dll)
-lnk_lib     += $(hdr_lib)
-lnk_dep     += $(hdr_lib)
-dlnk_lib    += -L$(hdr_home)/$(libd) -lhdrhist
-dlnk_dep    += $(hdr_dll)
-rpath4       = ,-rpath,$(pwd)/$(hdr_home)/$(libd)
-hdr_includes = -I$(hdr_home)/src
-else
-lnk_lib     += -lhdrhist
-dlnk_lib    += -lhdrhist
-hdr_includes = -I/usr/include/hdrhist
-endif
-
 natsmd_lib      := $(libd)/libnatsmd.a
 natsmd_dlnk_lib := -L$(pwd)/$(libd) -lnatsmd
 natsmd_dlnk_dep := $(libd)/libnatsmd.$(dll)
@@ -190,7 +181,7 @@ rpath      := -Wl,-rpath,$(pwd)/$(libd)$(rpath1)$(rpath2)$(rpath3)$(rpath4)$(rpa
 lnk_lib    += -Wl,--pop-state
 
 .PHONY: everything
-everything: $(kv_lib) $(dec_lib) $(md_lib) $(hdr_lib) all
+everything: $(kv_lib) $(dec_lib) $(md_lib) all
 
 clean_subs :=
 dlnk_dll_depend :=
@@ -221,15 +212,6 @@ clean_kv:
 	$(MAKE) -C $(kv_home) clean
 clean_subs += clean_kv
 endif
-ifneq (,$(hdr_home))
-$(hdr_lib) $(hdr_dll):
-	$(MAKE) -C $(hdr_home)
-.PHONY: clean_hdr
-clean_hdr:
-	$(MAKE) -C $(hdr_home) clean
-clean_subs += clean_hdr
-endif
-
 # copr/fedora build (with version env vars)
 # copr uses this to generate a source rpm with the srpm target
 -include .copr/Makefile
@@ -328,7 +310,6 @@ all_exes    += $(bind)/natsmd_server$(exe)
 all_depends += $(natsmd_server_deps)
 server_defines := -DNATSMD_VER=$(ver_build)
 
-ping_nats_includes := $(hdr_includes)
 ping_nats_defines  := -Wno-unused-function
 
 ping_nats_files := ping_nats
@@ -473,24 +454,23 @@ install: dist_bins
 	install -m 755 $(bind)/natsmd_server$(exe) $(install_prefix)/bin
 	install -m 755 $(bind)/natsmd_client$(exe) $(install_prefix)/bin
 	install -m 755 $(bind)/natsmd_pub$(exe) $(install_prefix)/bin
-	install -m 755 $(bind)/ping_nats$(exe) $(install_prefix)/bin
 	install -m 755 $(bind)/natsmd_api_client$(exe) $(install_prefix)/bin
 	install -m 644 include/natsmd/*.h $(install_prefix)/include/natsmd
 
 $(objd)/%.o: src/%.cpp
-	$(cpp) $(cflags) $(xtra_cflags) $(cppflags) $(includes) $(defines) $($(notdir $*)_includes) $($(notdir $*)_defines) -c $< -o $@
+	$(cpp) $(cxxflags) $(xtra_cflags) $(cppflags) $(includes) $(defines) $($(notdir $*)_includes) $($(notdir $*)_defines) -c $< -o $@
 
 $(objd)/%.o: src/%.c
 	$(cc) $(cflags) $(xtra_cflags) $(includes) $(defines) $($(notdir $*)_includes) $($(notdir $*)_defines) -c $< -o $@
 
 $(objd)/%.fpic.o: src/%.cpp
-	$(cpp) $(cflags) $(xtra_cflags) $(fpicflags) $(cppflags) $(includes) $(defines) $($(notdir $*)_includes) $($(notdir $*)_defines) -c $< -o $@
+	$(cpp) $(cxxflags) $(xtra_cflags) $(fpicflags) $(cppflags) $(includes) $(defines) $($(notdir $*)_includes) $($(notdir $*)_defines) -c $< -o $@
 
 $(objd)/%.fpic.o: src/%.c
 	$(cc) $(cflags) $(xtra_cflags) $(fpicflags) $(includes) $(defines) $($(notdir $*)_includes) $($(notdir $*)_defines) -c $< -o $@
 
 $(objd)/%.o: test/%.cpp
-	$(cpp) $(cflags) $(xtra_cflags) $(cppflags) $(includes) $(defines) $($(notdir $*)_includes) $($(notdir $*)_defines) -c $< -o $@
+	$(cpp) $(cxxflags) $(xtra_cflags) $(cppflags) $(includes) $(defines) $($(notdir $*)_includes) $($(notdir $*)_defines) -c $< -o $@
 
 $(objd)/%.o: test/%.c
 	$(cc) $(cflags) $(xtra_cflags) $(includes) $(defines) $($(notdir $*)_includes) $($(notdir $*)_defines) -c $< -o $@

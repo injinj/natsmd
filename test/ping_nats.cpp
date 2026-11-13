@@ -1,18 +1,98 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>
+#include <stdint.h>
+#include <inttypes.h>
 #ifndef _MSC_VER
 #include <unistd.h>
 #else
 #include <raikv/win.h>
 #endif
-#include <hdr_histogram.h>
 #include <raikv/ev_net.h>
 #include <raikv/ev_tcp.h>
 #include <raikv/util.h>
 
 using namespace rai;
 using namespace kv;
+
+/* Self-contained replacement for HdrHistogram_c, the only user of which in
+ * this whole repo was this one test/dev tool -- not worth an external
+ * library dependency just for a ping utility's latency report. Stores raw
+ * nanosecond samples and sorts them for exact percentiles at print time
+ * (no bucketed/compressed representation like real HDR histograms use),
+ * which is simple, exactly correct, and plenty fast for a single ping
+ * run's sample count. */
+struct LatencyHist {
+  uint64_t * vals;
+  size_t     count,
+             cap;
+
+  LatencyHist() : vals( 0 ), count( 0 ), cap( 0 ) {}
+
+  void record( uint64_t v ) {
+    if ( this->count == this->cap ) {
+      this->cap  = this->cap ? this->cap * 2 : 1024;
+      this->vals = (uint64_t *)
+        ::realloc( this->vals, this->cap * sizeof( this->vals[ 0 ] ) );
+    }
+    this->vals[ this->count++ ] = v;
+  }
+  void reset( void ) { this->count = 0; }
+
+  static int cmp_u64( const void *a,  const void *b ) {
+    uint64_t x = *(const uint64_t *) a,
+             y = *(const uint64_t *) b;
+    return x < y ? -1 : ( x > y ? 1 : 0 );
+  }
+  /* scale divides raw values before printing (e.g. 1000.0 to show usecs
+   * for recorded nanosecond deltas), matching hdr_percentiles_print()'s
+   * value_scale parameter's role. */
+  void print_percentiles( FILE *fp,  double scale ) {
+    if ( this->count == 0 ) {
+      ::fprintf( fp, "no samples recorded\n" );
+      return;
+    }
+    ::qsort( this->vals, this->count, sizeof( this->vals[ 0 ] ), cmp_u64 );
+
+    static const double pcts[] =
+      { 50.0, 75.0, 90.0, 95.0, 99.0, 99.9, 99.99, 99.999, 100.0 };
+    double sum = 0;
+    for ( size_t i = 0; i < this->count; i++ )
+      sum += (double) this->vals[ i ];
+    double mean = sum / (double) this->count;
+    double var  = 0;
+    for ( size_t i = 0; i < this->count; i++ ) {
+      double d = (double) this->vals[ i ] - mean;
+      var += d * d;
+    }
+    double stddev = ( this->count > 1 ) ?
+      ::sqrt( var / (double) ( this->count - 1 ) ) : 0.0;
+
+    ::fprintf( fp, "%11s %12s %10s\n", "Percentile", "Value", "Count<=" );
+    for ( size_t i = 0; i < sizeof( pcts ) / sizeof( pcts[ 0 ] ); i++ ) {
+      size_t idx = (size_t)
+        ( ( pcts[ i ] / 100.0 ) * (double) ( this->count - 1 ) + 0.5 );
+      if ( idx >= this->count )
+        idx = this->count - 1;
+      ::fprintf( fp, "%10.3f%% %12.3f %10" PRIu64 "\n", pcts[ i ],
+                 (double) this->vals[ idx ] / scale, (uint64_t) ( idx + 1 ) );
+    }
+    ::fprintf( fp, "#[Mean          = %12.3f]\n", mean / scale );
+    ::fprintf( fp, "#[StdDeviation  = %12.3f]\n", stddev / scale );
+    ::fprintf( fp, "#[Min           = %12.3f]\n",
+               (double) this->vals[ 0 ] / scale );
+    ::fprintf( fp, "#[Max           = %12.3f]\n",
+               (double) this->vals[ this->count - 1 ] / scale );
+    ::fprintf( fp, "#[Total count   = %10" PRIu64 "]\n",
+               (uint64_t) this->count );
+
+    ::free( this->vals );
+    this->vals  = 0;
+    this->cap   = 0;
+    this->count = 0;
+  }
+};
 
 static const size_t PING_MSG_SIZE = 32;
 struct PingMsg {
@@ -189,7 +269,7 @@ main( int argc, char **argv )
     return 1;
   }
 
-  struct hdr_histogram * histogram = NULL;
+  LatencyHist histogram;
   uint64_t ping_ival = 1000000000,
            last      = current_monotonic_time_ns(),
            next      = last + ping_ival,
@@ -232,18 +312,16 @@ main( int argc, char **argv )
       data.send( sub_ping, sizeof( sub_ping ) - 1 );
   }
 
-  if ( ! reflect )
-    hdr_init( 1, 1000000, 3, &histogram );
   while ( ! poll.quit ) {
     if ( data.recv_ping( src, stamp, num ) ) {
       /*spin_cnt = 0;*/
       if ( src == my_id ) {
         now  = current_monotonic_time_ns();
         next = now; /* send the next immediately */
-        hdr_record_value( histogram, now - stamp );
+        histogram.record( now - stamp );
         if ( count > 0 && --count == 0 ) {
           if ( warm > 0 ) {
-             hdr_reset( histogram );
+             histogram.reset();
              count = warm;
              warm  = 0;
           }
@@ -279,6 +357,6 @@ main( int argc, char **argv )
   }
   /*data.close();*/
   if ( ! reflect )
-    hdr_percentiles_print( histogram, stdout, 5, 1000.0, CLASSIC );
+    histogram.print_percentiles( stdout, 1000.0 );
   return 0;
 }
